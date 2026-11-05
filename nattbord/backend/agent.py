@@ -21,13 +21,16 @@ FALLBACK_REFUSAL = "Det kan jeg dessverre ikke hjelpe med."
 SYSTEM_PROMPT = """Du er en liten, vennlig nattbordsassistent på hybelen til en student i Trondheim. Alt du skriver blir lest høyt av en høyttaler.
 
 Slik svarer du:
-- Alltid norsk bokmål, muntlig og naturlig. Maks én til to korte setninger, helst under 30 ord.
+- Alltid norsk bokmål, muntlig og naturlig. Maks to korte setninger, under 30 ord. Ved oppramsing av avtaler: nevn de to eller tre viktigste kort.
 - Ingen markdown, lister, emoji, parenteser eller forkortelser. Si klokkeslett slik folk sier dem: «kvart over åtte», «halv tre», «klokka fire». Si «i dag», «i morgen» eller ukedagen i stedet for datoer.
 - Varm og litt leken, med litt personlighet, men aldri masete.
 - Teksten kommer ofte fra talegjenkjenning og kan ha feil. Tolk velvillig. Er det helt uforståelig, be kort om å gjenta.
 
+Kontekst:
+- Siste brukermelding starter med [Nå: …] og [Kontekst: …] med avtalene i dag og i morgen og siste romdata. Svar direkte fra konteksten uten verktøy når den holder. Kall get_events bare for andre datoer. Regn ut «i dag», «i morgen» og ukedager fra [Nå: …].
+
 Verktøy:
-- Kall alltid get_events før du svarer om avtaler eller planer. Regn ut «i dag», «i morgen» og ukedager fra linjen [Nå: …] i siste melding.
+- Handlinger (create_event, set_alarm, set_light, show_face): skriv den korte bekreftelsen til brukeren i SAMME svar som verktøykallet, ikke etterpå. Eksempel: «Klart, kollokvie klokka fire i morgen er lagt inn.»
 - Ny avtale: kall create_event med tid som YYYY-MM-DDTHH:MM. «Klokka fire» betyr 16:00 når det er naturlig for en student. Er slutt ikke oppgitt, sett én time etter start. Bekreft kort etterpå.
 - Spørsmål om temperatur, luft, fukt eller søvnklima: kall get_room.
 - Lys og nattlys: set_light. Vekking: set_alarm med 24-timers HH:MM. show_face brukes bare når det passer.
@@ -114,6 +117,7 @@ def _fmt_events(events: list[dict]) -> list[dict]:
 
 class Assistant:
     MAX_ROUNDS = 5
+    FAST_TOOLS = {"create_event", "set_alarm", "set_light", "show_face"}
 
     def __init__(self, device, room, calendar, cfg: Config) -> None:
         self.device, self.room, self.calendar, self.cfg = device, room, calendar, cfg
@@ -128,9 +132,35 @@ class Assistant:
         self.history = []
         log("agent", "samtalehistorikk nullstilt")
 
+    def _context_line(self) -> str:
+        now = datetime.now(self.tz)
+        try:
+            today = _fmt_events(self.calendar.get_events(now.date()))
+            tomorrow = _fmt_events(self.calendar.get_events((now + timedelta(days=1)).date()))
+        except Exception as e:  # noqa: BLE001
+            log("warn", f"kalender utilgjengelig: {e}")
+            today = tomorrow = []
+        compact = lambda evs: "; ".join(f"{e['start']}–{e['slutt']} {e['tittel']}" + (f" ({e['sted']})" if e["sted"] else "")
+                                        for e in evs) or "ingen"
+        snap = self.room.snapshot()
+        room = (f"{snap.get('temp')} °C, {snap.get('humidity')} % RH – {self.room.assess()}"
+                if snap.get("temp") is not None else "ingen måling ennå")
+        return f"[Kontekst: I dag: {compact(today)}. I morgen: {compact(tomorrow)}. Rom: {room}]"
+
+    def _user_msg(self, text: str) -> dict:
+        return {"role": "user", "content": [{"type": "text", "text": text}]}
+
+    def _with_history(self, msg: dict) -> list[dict]:
+        """Hurtigsporet kan la historikken slutte med tool_result; slå da sammen med ny brukermelding."""
+        if self.history and self.history[-1]["role"] == "user":
+            last = self.history[-1]
+            merged = {"role": "user", "content": list(last["content"]) + list(msg["content"])}
+            return self.history[:-1] + [merged]
+        return self.history + [msg]
+
     def respond(self, user_text: str) -> str:
-        msg = {"role": "user", "content": f"{self._now_line()}\n{user_text}"}
-        text, msgs = self._run(self.history + [msg])
+        msg = self._user_msg(f"{self._now_line()}\n{self._context_line()}\n{user_text}")
+        text, msgs = self._run(self._with_history(msg))
         if msgs is not None:
             self.history = msgs
             self._trim()
@@ -149,11 +179,11 @@ class Assistant:
             "Bestem selv hva du sier, maks to til tre korte setninger: minn om det viktigste i morgen, "
             "gi råd om lufting eller temperatur hvis rommet trenger det, og sett gjerne vekking med set_alarm "
             "omtrent en time før første avtale i morgen og si hva du satte den til. "
-            "Slå på nattlyset med set_light nightlight."
+            "Slå på nattlyset med set_light nightlight. Skriv hele beskjeden i samme svar som verktøykallene."
         )
         log("routine", "kveldsrutine startet")
         self._nightlight_set = False
-        text, msgs = self._run(self.history + [{"role": "user", "content": prompt}])
+        text, msgs = self._run(self._with_history(self._user_msg(prompt)))
         if not self._nightlight_set:
             log("routine", "modellen slo ikke på nattlys selv, gjør det nå")
             self.device.action("led_mode", "nightlight")
@@ -218,15 +248,23 @@ class Assistant:
                 break
 
             results = []
+            any_error = False
+            names = set()
             for block in resp.content:
                 if block.type != "tool_use":
                     continue
+                names.add(block.name)
                 result, is_error = self._exec_tool(block.name, block.input)
+                any_error |= is_error
                 entry = {"type": "tool_result", "tool_use_id": block.id, "content": result}
                 if is_error:
                     entry["is_error"] = True
                 results.append(entry)
             messages.append({"role": "user", "content": results})
+            # Hurtigspor: rene handlinger som lyktes, og bekreftelsen er allerede skrevet.
+            if text and not any_error and names <= self.FAST_TOOLS:
+                log("agent", "[dim]hurtigspor: hopper over runde 2[/dim]")
+                break
         else:
             log("warn", f"nådde maks {self.MAX_ROUNDS} verktøyrunder")
 
@@ -292,9 +330,16 @@ class Assistant:
         max_msgs = 12
         if len(self.history) <= max_msgs:
             return
+        def clean_user_turn(m: dict) -> bool:  # brukermelding uten tool_result = trygt kuttpunkt
+            if m["role"] != "user":
+                return False
+            if isinstance(m["content"], str):
+                return True
+            return not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in m["content"])
+
         for i in range(len(self.history) - max_msgs, len(self.history)):
             m = self.history[i]
-            if m["role"] == "user" and isinstance(m["content"], str):  # start på en ekte brukertur
+            if clean_user_turn(m):
                 self.history = self.history[i:]
                 return
         self.history = []

@@ -13,16 +13,34 @@ from backend.log import log
 PROMPT = "Kalender, forelesning, kollokvie, øving, innlevering, vekkerklokke, nattlys, i morgen."
 
 
+def _resolve(model: str) -> str:
+    """'nb' = Nasjonalbibliotekets norske whisper (CT2), hvis den er lastet ned."""
+    if model != "nb":
+        return model
+    try:
+        from huggingface_hub import snapshot_download
+
+        p = snapshot_download("NbAiLab/nb-whisper-small", local_files_only=True,
+                              allow_patterns=["ct2/*", "tokenizer.json", "preprocessor_config.json"])
+        ct2 = os.path.join(p, "ct2")
+        if os.path.exists(os.path.join(ct2, "model.bin")):
+            return ct2
+    except Exception:  # noqa: BLE001
+        pass
+    log("warn", "nb-whisper ikke funnet lokalt, bruker 'small'")
+    return "small"
+
+
 class STT:
     def __init__(self, model: str = "", compute_type: str = "int8"):
         from faster_whisper import WhisperModel
 
-        model = model or os.getenv("WHISPER_MODEL", "small")
+        model = _resolve(model or os.getenv("WHISPER_MODEL", "nb"))
         t0 = time.monotonic()
         self.model = WhisperModel(model, device="cpu", compute_type=compute_type)
         # oppvarming så første ekte forespørsel ikke er treg
         self.model.transcribe(np.zeros(16000, dtype=np.float32), language="no", beam_size=1)
-        log("stt", f"whisper '{model}' klar ({time.monotonic() - t0:.1f} s)")
+        log("stt", f"whisper '{'nb-whisper-small' if 'NbAiLab' in model else model}' klar ({time.monotonic() - t0:.1f} s)")
 
     def transcribe(self, pcm: np.ndarray) -> Optional[str]:
         """Returnerer tekst, eller None hvis det trolig ikke var tale."""
