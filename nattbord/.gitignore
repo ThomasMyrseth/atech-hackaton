@@ -1,0 +1,8 @@
+.env
+*.wav
+__pycache__/
+*.pyc
+data/
+firmware/build/
+firmware/.pio/
+service-account*.json
