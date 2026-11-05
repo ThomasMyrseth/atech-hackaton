@@ -1,0 +1,473 @@
+name: nattbord
+board: 14port
+modules_path: ./my_modules        # microphone: lokal kopi som velger aktiv I2S-kanal automatisk
+modules:
+  - {id: speaker,         instance: speaker, ports: [1, 2]}
+  - {id: microphone,      instance: mic,     ports: [3, 4]}
+  - {id: st7735_tft,      instance: tft,     ports: [5, 6]}
+  - {id: aht20,           instance: aht20,   port: 7}
+  - {id: distance_sensor, instance: dist,    port: 9}
+  - {id: neopixel,        instance: led,     port: 10}
+  - {id: button,          instance: btn,     port: 11}
+code:
+  globals: |
+    // ===================== Nattbordsassistent: firmware =====================
+    // Events ut (custom): presence, gesture, listen, audio_chunk, audio_end,
+    //                     audio_cancel, alarm
+    // Actions inn (custom): hello, set_time, face, led_mode, set_alarm,
+    //                     stop_alarm, set_threshold, set_presence, bench_record
+    // Innebygde: speaker_play_pcm, speaker_set_volume, speaker_stop, led_fill ...
+    #include <time.h>
+    #include <sys/time.h>
+    #include <Preferences.h>
+    #include "mbedtls/base64.h"
+
+    // ---------- lyd: ringbuffer fylt av mikrofon-tasken (core 0) ----------
+    static const int RB_SIZE = 32000;              // 2 s @ 16 kHz
+    static int16_t rb[RB_SIZE];
+    static volatile uint32_t rbWrite = 0;          // totalt antall samples skrevet
+    static uint32_t rbRead = 0;
+    void onMic(const int16_t* s, int n, void* ctx) {
+      uint32_t w = rbWrite;
+      for (int i = 0; i < n; i++) rb[(w + i) % RB_SIZE] = s[i];
+      rbWrite = w + n;
+    }
+
+    // ---------- tilstand ----------
+    enum Face { F_IDLE, F_LISTEN, F_THINK, F_TALK, F_SLEEP };
+    enum LedMode { L_OFF, L_NIGHT, L_LISTEN, L_THINK, L_STATUS, L_SUNRISE };
+    static Face face = F_IDLE;
+    static LedMode ledBase = L_OFF;                // satt av backend
+    static uint32_t sunriseStartMs = 0, sunriseDurMs = 0;
+    static bool present = false;
+    static int presenceEnterMm = 500;
+    static int threshold = 1500;
+    static uint32_t hostSeenMs = 0;                // sist backend sa hello (heartbeat hvert 20. s)
+    #define hostSeen (hostSeenMs != 0 && millis() - hostSeenMs < 60000UL)
+    static uint32_t muteUntil = 0;
+    static uint32_t lastPresenceMs = 0;
+
+    // opptak
+    static bool recording = false;
+    static int recKind = 0;                        // 0=vad 1=ptt(hold) 2=tap 3=bench
+    static uint32_t recStartMs = 0, lastLoudMs = 0, recLimitMs = 6000;
+    static uint32_t recSamples = 0;
+    static int recSeq = 0;
+    static int recMaxLevel = 0;
+
+    // alarm
+    static int alarmMin = -1;                      // minutter etter midnatt, -1 = av
+    static int alarmSunriseMin = 15;
+    static bool alarmRinging = false;
+    static uint32_t alarmRingStartMs = 0, lastRtttlMs = 0;
+    static int lastAlarmDay = -1, lastSunriseDay = -1;
+    Preferences prefs;
+
+    // ---------- hjelpere for events ----------
+    void evRaw(const char* type, const char* key, const char* jsonValue) {
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"%s\",\"key\":\"%s\",\"value\":%s}}\n", type, key, jsonValue);
+    }
+    void evStr(const char* type, const char* key, const char* s) {
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"%s\",\"key\":\"%s\",\"value\":\"%s\"}}\n", type, key, s);
+    }
+
+    // Generert kode har TX-timeout 0 og 256 B buffer: store linjer kuttes. Vent på plass (maks 60 ms).
+    void serialWriteAll(const uint8_t* p, size_t n) {
+      uint32_t t0 = millis();
+      while (n) {
+        int space = Serial.availableForWrite();
+        if (space > 0) {
+          size_t w = Serial.write(p, min((size_t)space, n));
+          p += w; n -= w;
+        } else {
+          if (millis() - t0 > 60) return;
+          delay(1);
+        }
+      }
+    }
+
+    static char chunkLine[3400];
+    static int16_t chunkBuf[1024];
+    void sendChunk(const int16_t* s, int n) {
+      int p = snprintf(chunkLine, sizeof(chunkLine),
+        "{\"type\":\"event\",\"payload\":{\"event_type\":\"sensor\",\"key\":\"audio_chunk\",\"value\":{\"seq\":%d,\"data\":\"", recSeq++);
+      size_t olen = 0;
+      mbedtls_base64_encode((unsigned char*)chunkLine + p, sizeof(chunkLine) - p - 8, &olen,
+                            (const unsigned char*)s, n * 2);
+      p += olen;
+      p += snprintf(chunkLine + p, sizeof(chunkLine) - p, "\"}}}\n");
+      serialWriteAll((const uint8_t*)chunkLine, p);
+    }
+
+    // send alt som ligger klart i ringbufferen (biter på 1024 samples)
+    void pumpAudio(bool flush) {
+      uint32_t w = rbWrite;
+      if (w - rbRead > (uint32_t)RB_SIZE) rbRead = w - RB_SIZE;   // overløp: hopp fram
+      while (w - rbRead >= 1024 || (flush && w > rbRead)) {
+        int n = min((uint32_t)1024, w - rbRead);
+        for (int i = 0; i < n; i++) chunkBuf[i] = rb[(rbRead + i) % RB_SIZE];
+        rbRead += n;
+        recSamples += n;
+        sendChunk(chunkBuf, n);
+      }
+    }
+
+    void startRecording(int kind, uint32_t limitMs) {
+      recording = true; recKind = kind; recLimitMs = limitMs;
+      recStartMs = millis(); lastLoudMs = recStartMs;
+      recSamples = 0; recSeq = 0; recMaxLevel = 0;
+      uint32_t w = rbWrite;
+      uint32_t preroll = (kind == 0) ? 4800 : 1600;              // 300 ms / 100 ms
+      rbRead = (w > preroll) ? w - preroll : 0;
+      face = F_LISTEN;
+      const char* kinds[] = {"vad", "ptt", "tap", "bench"};
+      evStr("state", "listen", kinds[kind]);
+    }
+
+    void stopRecording(const char* reason, bool cancel) {
+      if (!recording) return;
+      if (!cancel) pumpAudio(true);
+      recording = false;
+      float secs = recSamples / 16000.0f;
+      if (cancel || (recKind != 3 && secs < 0.7f)) {
+        evStr("state", "audio_cancel", cancel ? reason : "short");
+        face = F_IDLE;
+        return;
+      }
+      char buf[160];
+      const char* kinds[] = {"vad", "ptt", "tap", "bench"};
+      snprintf(buf, sizeof(buf), "{\"samples\":%u,\"chunks\":%d,\"rate\":16000,\"reason\":\"%s\",\"kind\":\"%s\"}",
+               (unsigned)recSamples, recSeq, reason, kinds[recKind]);
+      evRaw("state", "audio_end", buf);
+      face = F_THINK;                                            // umiddelbar feedback
+    }
+
+    bool timeValid() { return time(nullptr) > 1700000000; }
+
+    // Avstand: minste gyldige verdi i midtre 4x4 soner (kantsoner ser ofte kabinettet)
+    static int nearMm = 32767;
+    int computeNear() {
+      int best = 32767;
+      for (int r = 2; r <= 5; r++) for (int c = 2; c <= 5; c++) {
+        int d = dist.getDistance(r * 8 + c);
+        if (d >= 80 && d < best) best = d;
+      }
+      return best;
+    }
+
+    void setEpoch(const String& v) {
+      long long e = atoll(v.c_str());
+      if (e > 1700000000LL) {
+        struct timeval tv; tv.tv_sec = (time_t)e; tv.tv_usec = 0;
+        settimeofday(&tv, nullptr);
+      }
+    }
+
+    // ---------- skjerm ----------
+    static const uint16_t C_DIMORANGE = 0x50E0;
+    static const uint16_t C_EYE = 0xFFFF;
+    static const uint16_t C_CYAN = 0x07FF;
+    void drawCentered(const char* s, int y, int size, uint16_t color) {
+      int w = strlen(s) * 6 * size;
+      tft.displayText(s, (160 - w) / 2, y, size, color);
+    }
+    void clockStr(char* out) {
+      if (!timeValid()) { strcpy(out, "--:--"); return; }
+      time_t now = time(nullptr); struct tm t; localtime_r(&now, &t);
+      sprintf(out, "%02d:%02d", t.tm_hour, t.tm_min);
+    }
+    void drawFace() {
+      uint32_t ms = millis();
+      char clk[8]; clockStr(clk);
+      tft.clear();
+      if (face == F_SLEEP || alarmRinging) {
+        drawCentered(clk, 20, 4, alarmRinging ? (((ms / 500) % 2) ? 0xFD20 : 0xFFFF) : C_DIMORANGE);
+        if (alarmRinging) drawCentered("God morgen!", 64, 1, 0xFD20);
+        tft.display();
+        return;
+      }
+      int ex1 = 44, ex2 = 92, ey = 10, ew = 24, eh = 32;
+      uint16_t ec = C_EYE;
+      if (face == F_LISTEN) { ew = 28; eh = 38; ex1 = 40; ex2 = 92; ey = 6; ec = C_CYAN; }
+      if (face == F_THINK)  { ey = 4; eh = 24; ex1 = 50; ex2 = 98; }
+      bool blink = (face == F_IDLE) && ((ms % 4200) < 140);
+      if (blink) {
+        tft.fillRect(ex1, ey + eh / 2, ew, 3, ec);
+        tft.fillRect(ex2, ey + eh / 2, ew, 3, ec);
+      } else {
+        tft.fillRoundRect(ex1, ey, ew, eh, 8, ec);
+        tft.fillRoundRect(ex2, ey, ew, eh, 8, ec);
+      }
+      if (face == F_IDLE) {
+        drawCentered(clk, 56, 2, C_CYAN);
+        float t = aht20.readTemperature();
+        if (!isnan(t)) { char tb[12]; snprintf(tb, sizeof(tb), "%.1fC", t); tft.displayText(tb, 2, 2, 1, 0x8410); }
+      } else if (face == F_LISTEN) {
+        drawCentered("Lytter...", 66, 1, C_CYAN);
+      } else if (face == F_THINK) {
+        int k = (ms / 250) % 4;
+        for (int i = 0; i < 3; i++) tft.fillCircle(66 + i * 14, 52, 4, i < k ? 0xFFE0 : 0x4208);
+      } else if (face == F_TALK) {
+        int mh = ((ms / 140) % 2) ? 12 : 4;
+        tft.fillRoundRect(64, 56 - mh / 2 + 4, 32, mh, 4, C_EYE);
+      }
+      tft.display();
+    }
+
+    // ---------- LED ----------
+    static const int PERIM[8] = {0, 1, 2, 5, 8, 7, 6, 3};
+    void ledAll(int r, int g, int b) { led.setAll(r, g, b); }
+    void drawLeds() {
+      uint32_t ms = millis();
+      LedMode m = ledBase;
+      if (recording) m = L_LISTEN;
+      else if (face == F_THINK) m = L_THINK;
+      if (sunriseDurMs > 0) m = L_SUNRISE;
+      led.clear();
+      led.setBrightness(51);
+      if (alarmRinging) {
+        int v = ((ms / 600) % 2) ? 255 : 120;
+        ledAll(v, (v * 3) / 4, v / 3);
+      } else if (m == L_NIGHT) {
+        led.setBrightness(14);
+        ledAll(255, 70, 5);
+      } else if (m == L_LISTEN) {
+        float ph = (sin(ms / 250.0) + 1) / 2;
+        ledAll(0, (int)(40 + 60 * ph), (int)(120 + 135 * ph));
+      } else if (m == L_THINK) {
+        int head = (ms / 90) % 8;
+        led.setPixel(PERIM[head], 170, 0, 255);
+        led.setPixel(PERIM[(head + 7) % 8], 50, 0, 90);
+        led.setPixel(PERIM[(head + 6) % 8], 15, 0, 30);
+      } else if (m == L_STATUS) {
+        float t = aht20.readTemperature(), h = aht20.readHumidity();
+        bool tOk = t >= 16 && t <= 19, hOk = h >= 40 && h <= 60;
+        bool tNear = t >= 15 && t <= 21, hNear = h >= 30 && h <= 70;
+        if (tOk && hOk) ledAll(0, 200, 40);
+        else if (tNear && hNear) ledAll(220, 150, 0);
+        else ledAll(255, 20, 0);
+      } else if (m == L_SUNRISE) {
+        float p = sunriseDurMs ? (float)(ms - sunriseStartMs) / sunriseDurMs : 1.0f;
+        if (p > 1) p = 1;
+        int r, g, b;
+        if (p < 0.33f)      { float q = p / 0.33f;          r = 40 + 215 * q; g = 0 + 50 * q;   b = 0; }
+        else if (p < 0.66f) { float q = (p - 0.33f) / 0.33f; r = 255;          g = 50 + 110 * q; b = 0 + 50 * q; }
+        else                { float q = (p - 0.66f) / 0.34f; r = 255;          g = 160 + 70 * q; b = 50 + 110 * q; }
+        led.setBrightness(2 + (int)(49 * p));
+        ledAll(r, g, b);
+      }
+      led.show();
+    }
+
+    // ---------- alarm ----------
+    void saveAlarm() {
+      prefs.begin("nattbord", false);
+      prefs.putInt("amin", alarmMin);
+      prefs.putInt("asun", alarmSunriseMin);
+      prefs.end();
+    }
+    void stopAlarm(const char* why) {
+      if (alarmRinging) { alarmRinging = false; speaker.stop(); evStr("state", "alarm", "stopped"); }
+      sunriseDurMs = 0;
+      face = present ? F_IDLE : F_SLEEP;
+    }
+    void checkAlarm() {
+      if (alarmMin < 0 || !timeValid()) return;
+      time_t now = time(nullptr); struct tm t; localtime_r(&now, &t);
+      int nowMin = t.tm_hour * 60 + t.tm_min;
+      int sunStart = alarmMin - alarmSunriseMin;
+      int nowSec = nowMin * 60 + t.tm_sec;
+      // soloppgang
+      bool inSunrise = (sunStart >= 0) ? (nowMin >= sunStart && nowMin < alarmMin)
+                                       : (nowMin >= sunStart + 1440 || nowMin < alarmMin);
+      if (inSunrise && lastSunriseDay != t.tm_yday && !alarmRinging && alarmSunriseMin > 0) {
+        lastSunriseDay = t.tm_yday;
+        int startSec = ((sunStart + 1440) % 1440) * 60;
+        int elapsed = (nowSec - startSec + 86400) % 86400;
+        sunriseDurMs = (uint32_t)alarmSunriseMin * 60000UL;
+        sunriseStartMs = millis() - (uint32_t)elapsed * 1000UL;
+        evStr("state", "alarm", "sunrise");
+      }
+      // vekking
+      if (nowMin == alarmMin && lastAlarmDay != t.tm_yday && !alarmRinging) {
+        lastAlarmDay = t.tm_yday;
+        alarmRinging = true; alarmRingStartMs = millis(); lastRtttlMs = 0;
+        if (recording) stopRecording("alarm", true);
+        evStr("state", "alarm", "ringing");
+      }
+    }
+    void serviceAlarm() {
+      if (!alarmRinging) return;
+      uint32_t ms = millis();
+      if (ms - alarmRingStartMs > 5UL * 60000UL) { stopAlarm("timeout"); return; }
+      if (!speaker.isPlaying() && ms - lastRtttlMs > 1500) {
+        lastRtttlMs = ms;
+        speaker.playRTTTL("morgen:d=8,o=5,b=140:c,e,g,c6,4p,g,c6,e6,4g6,4p,e6,c6,g,e,4c6");
+      }
+    }
+
+  setup: |
+    Serial.setTxBufferSize(16384);   // plass til lydbiter (ca. 2,8 KB per linje)
+    mic.onAudio(onMic, nullptr);
+    speaker.setVolume(0.6f);
+    setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+    tzset();
+    prefs.begin("nattbord", true);
+    alarmMin = prefs.getInt("amin", -1);
+    alarmSunriseMin = prefs.getInt("asun", 15);
+    prefs.end();
+    led.clear(); led.show();
+
+  loop: |
+    static uint32_t tPresence = 0, tFace = 0, tLed = 0, tAlarm = 0, tLevel = 0;
+    static int nearCount = 0;
+    static uint32_t farSince = 0;
+    static bool btnDown = false, btnSwallow = false;
+    static uint32_t btnDownMs = 0;
+    static Face lastFace = F_IDLE;
+    uint32_t now = millis();
+
+    // ---------- actions fra backend ----------
+    if (atech_action.length()) {
+      const String& a = atech_action; const String& v = atech_value;
+      if (a == "hello") {
+        bool wasSeen = hostSeen;
+        setEpoch(v); hostSeenMs = millis(); atechDone();
+        if (!wasSeen) {
+          evStr("state", "presence", present ? "enter" : "leave");
+          char ab[48]; if (alarmMin >= 0) snprintf(ab, sizeof(ab), "set %02d:%02d/%d", alarmMin / 60, alarmMin % 60, alarmSunriseMin); else strcpy(ab, "off");
+          evStr("state", "alarm", ab);
+        }
+      }
+      else if (a == "set_time") { setEpoch(v); atechDone(); }
+      else if (a == "face") {
+        if (v == "idle") face = F_IDLE; else if (v == "listening") face = F_LISTEN;
+        else if (v == "thinking") face = F_THINK; else if (v == "talking") face = F_TALK;
+        else if (v == "sleep") face = F_SLEEP; else { atechFail("unknown face"); }
+        if (atech_action.length()) atechDone();
+      }
+      else if (a == "led_mode") {
+        if (v == "off") ledBase = L_OFF; else if (v == "nightlight") ledBase = L_NIGHT;
+        else if (v == "listening") ledBase = L_LISTEN; else if (v == "thinking") ledBase = L_THINK;
+        else if (v == "status") ledBase = L_STATUS;
+        else if (v.startsWith("sunrise")) {
+          int mins = v.indexOf(':') > 0 ? v.substring(v.indexOf(':') + 1).toInt() : 15;
+          if (mins < 1) mins = 1;
+          sunriseDurMs = (uint32_t)mins * 60000UL; sunriseStartMs = now;
+        } else { atechFail("unknown led mode"); }
+        if (v != "sunrise" && !v.startsWith("sunrise")) sunriseDurMs = alarmRinging ? sunriseDurMs : 0;
+        if (atech_action.length()) atechDone();
+      }
+      else if (a == "set_alarm") {
+        if (v == "off") { alarmMin = -1; saveAlarm(); atechDone(); evStr("state", "alarm", "off"); }
+        else {
+          int hh = v.substring(0, 2).toInt(), mm = v.substring(3, 5).toInt();
+          int slash = v.indexOf('/');
+          alarmSunriseMin = slash > 0 ? v.substring(slash + 1).toInt() : 15;
+          if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || v.length() < 5) { atechFail("format HH:MM[/min]"); }
+          else {
+            alarmMin = hh * 60 + mm; lastAlarmDay = -1; lastSunriseDay = -1; saveAlarm(); atechDone();
+            char ab[32]; snprintf(ab, sizeof(ab), "set %02d:%02d/%d", hh, mm, alarmSunriseMin);
+            evStr("state", "alarm", ab);
+          }
+        }
+      }
+      else if (a == "stop_alarm") { stopAlarm("action"); atechDone(); }
+      else if (a == "set_threshold") { threshold = max(50L, v.toInt()); atechDone(); }
+      else if (a == "set_presence") { presenceEnterMm = max(100L, v.toInt()); atechDone(); }
+      else if (a == "dist_grid") {
+        String s = "["; for (int i = 0; i < 64; i++) { s += String(dist.getDistance(i)); if (i < 63) s += ","; } s += "]";
+        evRaw("log", "dist_grid", s.c_str()); atechDone();
+      }
+      else if (a == "bench_record") {
+        int secs = v.toInt(); if (secs < 1) secs = 5; if (secs > 10) secs = 10;
+        if (recording) stopRecording("bench", true);
+        startRecording(3, secs * 1000UL); atechDone();
+      }
+    }
+
+    // ---------- presence (hysterese) ----------
+    if (now - tPresence >= 100) {
+      tPresence = now;
+      int d = computeNear();
+      nearMm = d;
+      bool valid = d > 0 && d < 32767;
+      if (valid && d < presenceEnterMm) { nearCount++; farSince = 0; }
+      else { nearCount = 0; if (!farSince) farSince = now; }
+      if (!present && nearCount >= 3) {
+        present = true; lastPresenceMs = now;
+        if (face == F_SLEEP && !alarmRinging) face = F_IDLE;
+        evStr("state", "presence", "enter");
+      } else if (present && farSince && (!valid || d > presenceEnterMm + 200) && now - farSince > 3000) {
+        present = false; lastPresenceMs = now;
+        evStr("state", "presence", "leave");
+      }
+      if (!present && face == F_IDLE && now - lastPresenceMs > 30000) face = F_SLEEP;
+    }
+
+    // ---------- demping etter tale ----------
+    if (lastFace == F_TALK && face != F_TALK) muteUntil = now + 500;
+    lastFace = face;
+
+    // ---------- knapp ----------
+    bool down = btn.isPressed();
+    if (down && !btnDown) {
+      btnDown = true; btnDownMs = now; btnSwallow = false;
+      if (alarmRinging || sunriseDurMs) { stopAlarm("button"); btnSwallow = true; }
+    }
+    if (btnDown && down && !btnSwallow && hostSeen) {
+      if (!recording && now - btnDownMs > 400 && face != F_TALK) startRecording(1, 10000);
+    }
+    if (!down && btnDown) {
+      btnDown = false;
+      uint32_t held = now - btnDownMs;
+      if (!btnSwallow) {
+        if (recording && recKind == 1) {
+          if (held > 3000 && recMaxLevel < threshold) { stopRecording("demo", true); evStr("button", "gesture", "demo"); }
+          else stopRecording("button", false);
+        } else if (held <= 400) {
+          evStr("button", "gesture", "press");
+          if (recording && recKind == 0) recKind = 2;     // trykk under auto-opptak = direkte forespørsel
+          else if (hostSeen && !recording && face != F_TALK) startRecording(2, 6000);
+        }
+      }
+    }
+
+    // ---------- lytting (VAD) ----------
+    int level = mic.getSoundLevel();
+    if (recording) {
+      uint32_t nowv = millis();          // ikke `now`: opptaket kan ha startet senere i denne runden
+      if (level > recMaxLevel) recMaxLevel = level;
+      if (level > threshold * 6 / 10) lastLoudMs = nowv;
+      pumpAudio(false);
+      uint32_t dur = nowv - recStartMs;
+      if (recKind == 3) { if (dur >= recLimitMs) stopRecording("bench", false); }
+      else if (recKind == 1) { if (dur >= recLimitMs) stopRecording("max", false); }
+      else {
+        if (dur >= recLimitMs) stopRecording("max", false);
+        else if (nowv - lastLoudMs > 1000 && dur > 600) stopRecording("silence", false);
+      }
+    } else {
+      bool canListen = hostSeen && present && now > muteUntil && face != F_THINK && face != F_TALK
+                       && !alarmRinging && !btnDown;
+      if (canListen && level > threshold) startRecording(0, 6000);
+    }
+
+    // ---------- diagnose hvert 2. s (kalibrering på stedet) ----------
+    static uint32_t tDiag = 0;
+    if (now - tDiag >= 2000) {
+      tDiag = now;
+      char db[160];
+      snprintf(db, sizeof(db), "{\"near\":%d,\"min\":%d,\"level\":%d,\"micL\":%d,\"micR\":%d,\"ch\":%d,\"thr\":%d,\"present\":%s}",
+               nearMm, (int)dist.getMinDistance(), level, (int)mic.dbgRmsL, (int)mic.dbgRmsR, mic.activeChannel,
+               threshold, present ? "true" : "false");
+      evRaw("log", "diag", db);
+    }
+
+    // ---------- alarm, skjerm, LED ----------
+    if (now - tAlarm >= 1000) { tAlarm = now; checkAlarm(); }
+    serviceAlarm();
+    if (!recording || now - tFace >= 250) {
+      if (now - tFace >= 120) { tFace = now; drawFace(); }
+    }
+    if (now - tLed >= 50) { tLed = now; drawLeds(); }

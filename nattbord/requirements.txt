@@ -1,0 +1,7 @@
+anthropic
+atech
+python-dotenv
+faster-whisper
+numpy
+sounddevice
+rich
