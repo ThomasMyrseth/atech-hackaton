@@ -25,6 +25,7 @@ from backend.room import Room
 from backend.stt import STT
 
 IGNORE_KEYS = {"mic_level", "knob", "knob_btn"}
+DEMO_ALARM_S = 10
 
 
 class App:
@@ -223,6 +224,10 @@ class App:
         self.device.action("speaker_set_volume", float(os.getenv("SPEAKER_VOLUME", "0.85")))
         self.device.action("face", "idle")
         threading.Thread(target=self.worker, daemon=True).start()
+        if self.args.demo_alarm:
+            timer = threading.Timer(DEMO_ALARM_S, self.device.action, ("ring_alarm",))
+            timer.daemon = True
+            timer.start()
         if self.laptop:
             self.laptop.start()
         engine = "elevenlabs" if os.getenv("ELEVENLABS_API_KEY") and os.getenv("TTS_ENGINE", "elevenlabs") != "say" else "say"
@@ -250,6 +255,7 @@ def main() -> None:
     p.add_argument("--no-board", action="store_true", help="run without a board (laptop mic and speaker)")
     p.add_argument("--greet", action="store_true", help="greet when someone arrives after >2 min away")
     p.add_argument("--save-audio", action="store_true", help="save the last utterance in data/")
+    p.add_argument("--demo-alarm", action="store_true", help=f"ring the alarm {DEMO_ALARM_S} s after start")
     p.add_argument("--diag", action="store_true", help="show mic level every 2 s (calibration)")
     app = App(p.parse_args())
     try:

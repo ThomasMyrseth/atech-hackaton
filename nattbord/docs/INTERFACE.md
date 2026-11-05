@@ -53,6 +53,7 @@ Formatet er én JSON-linje per melding, 115200 baud. Firmwaren er `firmware/proj
 | `led_mode` | `off`, `nightlight`, `listening`, `thinking`, `status`, `sunrise:N` |
 | `set_alarm` | `HH:MM[/soloppgangsminutter]` eller `off` |
 | `stop_alarm` | ingen |
+| `ring_alarm` | ingen, ringer med en gang (demo) |
 | `set_threshold` | mikrofonterskel |
 | `bench_record` | sekunder, 1 til 10 |
 | `listen_now` | ingen, åpner mikrofonen én gang i opptil 8 s, med kind `vad` |

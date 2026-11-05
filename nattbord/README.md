@@ -13,8 +13,8 @@ Atech-SDK-et snakker med brettet **bare over USB-seriell**. Wi-Fi-gatewayen bruk
 | Port | Modul |
 |---|---|
 | 1–2 | Høyttaler |
-| 3–4 | Mikrofon |
-| 5–6 | Skjerm 160x80 |
+| 3–4 | Skjerm 160x80 |
+| 5–6 | Mikrofon |
 | 7 | Temp/fukt (AHT20) |
 | 9–10 | Knott (trykk ned = knapp og morsenøkkel) |
 | 11 | LED-grid 3x3 |
@@ -44,7 +44,7 @@ Assistenten kan lese, legge inn, flytte og slette. Gjentakende avtaler endres ba
 ```sh
 ../.venv/bin/atech upload firmware             # flash brettet (USB-C datakabel)
 ../.venv/bin/atech check                       # hvilke moduler svarte
-./run.sh                                       # full stemmeløkke mot brettet (samme som linja under)
+./run.sh                                       # full stemmeløkke mot brettet, med demoalarm etter 10 s
 ../.venv/bin/python -m backend.main            # full stemmeløkke mot brettet
 ../.venv/bin/python -m backend.main --no-board # bare laptop (mik + høyttaler)
 ../.venv/bin/python -m backend.textmode        # skriv i stedet for å snakke
@@ -90,6 +90,7 @@ I tillegg kommer de innebygde `aht20_temperature`, `aht20_humidity`, `mic_level`
 - `led_mode` (off|nightlight|listening|thinking|status|sunrise:N)
 - `set_alarm` (HH:MM[/soloppgangsminutter] | off)
 - `stop_alarm`
+- `ring_alarm`
 - `set_threshold`
 - `bench_record`
 - `listen_now`

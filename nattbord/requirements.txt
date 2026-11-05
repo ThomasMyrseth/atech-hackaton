@@ -6,3 +6,4 @@ numpy
 sounddevice
 rich
 google-auth[requests]
+httpx

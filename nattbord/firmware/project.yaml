@@ -3,8 +3,8 @@ board: 14port
 modules_path: ./my_modules        # microphone: lokal kopi som velger aktiv I2S-kanal automatisk
 modules:
   - {id: speaker,         instance: speaker, ports: [1, 2]}
-  - {id: microphone,      instance: mic,     ports: [3, 4]}
-  - {id: st7735_tft,      instance: tft,     ports: [5, 6]}
+  - {id: st7735_tft,      instance: tft,     ports: [3, 4]}
+  - {id: microphone,      instance: mic,     ports: [5, 6]}
   - {id: aht20,           instance: aht20,   port: 7}
   - {id: rotary_encoder,  instance: knob,    ports: [9, 10]}   # trykk ned = knapp og morsenøkkel
   - {id: neopixel,        instance: led,     port: 11}
@@ -15,7 +15,7 @@ code:
     //                     audio_cancel, alarm, edge, morse_done
     // Actions inn (custom): hello, set_time, face, led_mode, set_alarm,
     //                     stop_alarm, set_threshold, bench_record,
-    //                     listen_now, game_mode, morse
+    //                     listen_now, game_mode, morse, ring_alarm
     // Innebygde: speaker_play_pcm, speaker_set_volume, speaker_stop, led_fill ...
     #include <time.h>
     #include <sys/time.h>
@@ -267,6 +267,11 @@ code:
       sunriseDurMs = 0;
       face = F_IDLE;
     }
+    void ringAlarm() {
+      alarmRinging = true; alarmRingStartMs = millis(); lastRtttlMs = 0;
+      if (recording) stopRecording("alarm", true);
+      evStr("state", "alarm", "ringing");
+    }
     void checkAlarm() {
       if (alarmMin < 0 || !timeValid()) return;
       time_t now = time(nullptr); struct tm t; localtime_r(&now, &t);
@@ -287,9 +292,7 @@ code:
       // vekking
       if (nowMin == alarmMin && lastAlarmDay != t.tm_yday && !alarmRinging) {
         lastAlarmDay = t.tm_yday;
-        alarmRinging = true; alarmRingStartMs = millis(); lastRtttlMs = 0;
-        if (recording) stopRecording("alarm", true);
-        evStr("state", "alarm", "ringing");
+        ringAlarm();
       }
     }
     void serviceAlarm() {
@@ -368,6 +371,7 @@ code:
         }
       }
       else if (a == "stop_alarm") { stopAlarm("action"); atechDone(); }
+      else if (a == "ring_alarm") { if (!alarmRinging) ringAlarm(); atechDone(); }  // demo: set_alarm har bare minutter
       else if (a == "set_threshold") { threshold = max(50L, v.toInt()); atechDone(); }
       else if (a == "bench_record") {
         int secs = v.toInt(); if (secs < 1) secs = 5; if (secs > 10) secs = 10;
