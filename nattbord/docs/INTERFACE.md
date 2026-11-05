@@ -23,7 +23,7 @@ Tre tråder er verdt å kjenne:
 |---|---|---|
 | SDK-lesetråd | leser seriellporten, leverer acks | rør den aldri |
 | Hovedløkka (`App.run`) | `device.recv`, `on_event`, `handle_event` | må aldri blokkere |
-| Arbeidertråden (`App.worker`) | STT, Claude, `call`, `context`, tale | én jobb om gangen, så en treg jobb holder igjen neste |
+| Arbeidertråden (`App.worker`) | STT, Claude, `call`, `context`, `after_turn`, tale | én jobb om gangen, så en treg jobb holder igjen neste |
 
 ## 2. Kontrakten mot brettet
 
@@ -54,9 +54,10 @@ Formatet er én JSON-linje per melding, 115200 baud. Firmwaren er `firmware/proj
 | `set_alarm` | `HH:MM[/soloppgangsminutter]` eller `off` |
 | `stop_alarm` | ingen |
 | `set_threshold` | mikrofonterskel |
-| `set_presence` | avstand i mm |
-| `dist_grid` | ingen, svarer med eventet `dist_grid` |
 | `bench_record` | sekunder, 1 til 10 |
+| `listen_now` | ingen, åpner mikrofonen én gang i opptil 8 s, med kind `vad` |
+| `game_mode` | `1` eller `0`. I spillmodus er knotten morsenøkkel, mikrofonen lytter ikke, og griden tegnes ikke |
+| `morse` | `<unit_ms>:<mønster>`, for eksempel `150:.-. . -..`. Krever `game_mode 1` |
 | `speaker_play_rtttl`, `speaker_set_volume`, `speaker_stop`, `speaker_play_pcm` | innebygd |
 | `led_fill`, `led_pixel`, `led_clear` | innebygd |
 
@@ -64,17 +65,19 @@ Formatet er én JSON-linje per melding, 115200 baud. Firmwaren er `firmware/proj
 
 | Event | Verdi |
 |---|---|
-| `presence` | `enter`, `leave` |
+| `presence` | `enter`, bare når backend kobler til |
 | `gesture` | `press`, `demo` |
 | `listen` | `vad`, `ptt`, `tap`, `bench` |
 | `audio_chunk` | `{seq, data}` |
 | `audio_end` | `{samples, chunks, rate, reason, kind}` |
 | `audio_cancel` | årsak |
 | `alarm` | tilstand, f.eks. `stopped` |
-| `diag`, `dist_grid` | diagnostikk |
-| `aht20_temperature`, `aht20_humidity`, `dist_min_distance`, `mic_level`, `btn` | innebygd |
+| `edge` | `1:<millis>` ved trykk, `0:<millis>` ved slipp. Bare i spillmodus |
+| `morse_done` | `1`, når blinkingen er ferdig |
+| `diag` | diagnostikk |
+| `aht20_temperature`, `aht20_humidity`, `mic_level`, `knob`, `knob_btn` | innebygd |
 
-`kind` forteller om opptaket startet av seg selv (`vad`) eller med knappen (`ptt`, `tap`). Det avgjør om agenten får skrive.
+`kind` forteller om opptaket startet av seg selv (`vad`) eller med knotten (`ptt`, `tap`). Det avgjør om agenten får skrive.
 
 ## 3. Kontrakten for en plugin
 
@@ -85,13 +88,15 @@ Arv `Plugin` og overstyr bare det du trenger.
 | `name` | navn i logg og kontekst | Kort og norsk, det kan bli lest høyt. |
 | `tools` | Anthropic-verktøy | `strict: true`, alle felt `required`, unikt navn. Regler for modellen skrives i `description`. |
 | `writes` | verktøy som endrer noe utenfor | Må alltid fylles ut riktig, se under. |
+| `fast` | verktøy der svaret er ferdig i samme tur | Hopper over runde 2 med Claude, så teksten ved siden av verktøykallet blir stående. |
 | `call(tool, args)` | utfører verktøyet | Arbeidertråden, kan ta noen sekunder. Returnerer JSON-tekst. Exception blir `Feil: ...` til modellen. |
 | `context()` | én linje i `[Kontekst: ...]` | Kjører hver tur, så den må være rask eller cachet. Exception blir `<name>: utilgjengelig`. |
 | `handle_event(key, value)` | se events fra brettet | Hovedløkka. Må aldri blokkere. `True` betyr at ingen andre ser eventet. Exception logges og regnes som `False`. |
+| `after_turn(say)` | kjører etter hver jobb, når talen er ferdig | Arbeidertråden, kan ta lang tid, og andre jobber venter imens. `True` betyr at plugin-en snakket med brukeren, så mikrofonen åpnes én gang for svaret. |
 
 ### Skriveregelen
 
-Et verktøy i `writes` kjører bare ved en direkte forespørsel: knappetrykk eller tekstmodus. Alltid-på-mikrofonen og rutinene kan lese, men ikke skrive. Sperren ligger i `Assistant._exec_tool`, så du trenger ikke kode for den.
+Et verktøy i `writes` kjører bare ved en direkte forespørsel: trykk på knotten eller tekstmodus. Alltid-på-mikrofonen og rutinene kan lese, men ikke skrive. Sperren ligger i `Assistant._exec_tool`, så du trenger ikke kode for den.
 
 **Alt som endrer noe utenfor skal stå i `writes`.** Sperren vet ikke om verktøy du glemmer. Bakgrunnsprat og feilhørt tale kan ellers endre ekte data.
 
@@ -139,7 +144,7 @@ Et spill starter med et verktøy og eier så input fra brettet til det er ferdig
 class MiniSpill(Plugin):
     name = "minispill"
     tools = [...]  # start_game
-    EIER = {"btn", "gesture", "listen", "audio_chunk", "audio_end", "audio_cancel"}
+    EIER = {"knob_btn", "gesture", "listen", "audio_chunk", "audio_end", "audio_cancel"}
 
     def __init__(self, device) -> None:
         self.device, self.running, self.inbox = device, False, queue.Queue()
@@ -164,12 +169,12 @@ class MiniSpill(Plugin):
 
 Bruk `get_plugins(cfg, device)` for å gi spillet `device`. Eget trådløp og en kø er samme mønster som `_pump` og `inbox` i `morse/trainer.py`.
 
-### Dette må på plass før første spill
+Et spill som snakker bør heller kjøre i `after_turn`, slik `backend/morse_game.py` gjør. Da starter det først når agenten har snakket ferdig, og rutinene venter i køen til spillet er over.
 
-Spillene er ikke bygd ennå. Disse tingene må løses da:
+### Dette må på plass før neste spill
 
-- **Pause rutinene.** `check_schedule` starter kveldsrutinen også midt i et spill. Første spill må legge inn en pause der.
-- **Morse trenger felles firmware.** Morse har egen firmware i `morse/fw`, og å flashe den erstatter nattbordets. Portene passer (høyttaler 1–2, mikrofon 3–4, LED 10, knapp 11), så veien er å slå dem sammen i én `project.yaml` og så pakke `Trainer` inn som en plugin.
+`backend/morse_game.py` er det eneste spillet så langt. Disse tingene må løses for neste spill:
+
 - **Skjermen trenger en ny action.** `st7735_tft` har ingen actions, og firmwaren tegner bare ansikt, klokke og temperatur. Et spill på skjermen krever en ny action og ny flashing.
 - **Spillogikk hører trolig hjemme på brettet.** Hver action venter på en ack og hver linje er maks 4096 tegn, så å strømme bilder fra laptopen blir tregt. La brettet tegne, og send bare tilstand.
 - **Timing hører hjemme i firmwaren.** Morse stempler `edge` på brettet fordi jitter i USB og Python ellers ødelegger lengden på prikker og streker.

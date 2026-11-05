@@ -16,7 +16,7 @@ MONTHS = ["January", "February", "March", "April", "May", "June", "July", "Augus
 FALLBACK_ERROR = "Sorry, I can't reach my brain right now. Try again in a moment."
 FALLBACK_REFUSAL = "Sorry, I can't help with that."
 FALLBACK_TOOL_ERROR = "Sorry, I couldn't do that."
-NEEDS_BUTTON = "Needs a button press: ask the user to press the button and say it again."
+NEEDS_BUTTON = "Needs a knob press: ask the user to press the knob and say it again."
 
 # Static system prompt (date and time go in the user message, so history stays append-only).
 SYSTEM_PROMPT = """You are a small, friendly bedside assistant in a student's room in Trondheim. Everything you write is read aloud by a speaker.
@@ -99,7 +99,7 @@ class Assistant:
         self.write_tools = {name for p in plugins for name in p.writes}
         if not self.write_tools <= set(self.routes):  # a typo here would let the tool past the button
             raise ValueError(f"writes without a tool: {sorted(self.write_tools - set(self.routes))}")
-        self.fast_tools = self.BOARD_ACTIONS | self.write_tools
+        self.fast_tools = self.BOARD_ACTIONS | self.write_tools | {name for p in plugins for name in p.fast}
         kw = {"timeout": 20.0, "max_retries": 1}
         self.client = anthropic.Anthropic(api_key=cfg.anthropic_api_key, **kw) if cfg.anthropic_api_key \
             else anthropic.Anthropic(**kw)
@@ -180,13 +180,14 @@ class Assistant:
         return text
 
     def morning_routine(self) -> str:
-        """Runs when the alarm is turned off: good morning + the most important thing today."""
+        """Runs when the alarm is turned off: good morning, today's agenda and the offer of a morse game."""
         self._can_write = False
         prompt = (
             f"{self._now_line()}\n{self._context_line()}\n"
-            "The alarm clock was just turned off and the user has just woken up. Say good morning and the most "
-            "important thing today in at most two short, encouraging sentences. Turn off the light with "
-            "set_light off, and write the message in the same reply."
+            "The alarm clock was just turned off and the user has just woken up. Say good morning, briefly go "
+            "through today's agenda, and end by asking if they want to play a quick morse game. Use at most three "
+            "short, encouraging sentences. Turn off the light with set_light off, and write the message in the "
+            "same reply."
         )
         if datetime.now(self.tz).hour >= 12:  # demo in the evening: pretend it is the next morning
             prompt += (" (This is a demo of the morning: pretend it is tomorrow morning, and refer to tomorrow's "

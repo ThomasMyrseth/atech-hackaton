@@ -27,6 +27,7 @@ STT_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime?" + urlencode({
 }, doseq=True)
 CHUNK_BYTES = 8000  # 250 ms
 TIMEOUT_S = 5.0     # the voice loop waits on this
+SHORT_ANSWERS = {"yes", "yeah", "yep", "sure", "okay", "ok", "no", "nope"}  # single words that still answer a question
 
 
 def open_socket():
@@ -81,7 +82,7 @@ class STT:
             raise ExternalError(f"{type(e).__name__}: {e}") from e
         dt = time.monotonic() - t0
         words = len(text.split())
-        if words < 2:
+        if words < 2 and text.lower().strip(" .,!?") not in SHORT_ANSWERS:
             log("stt", f"[dim]discarded \"{text}\" (words={words}, {dt:.2f} s)[/dim]")
             return None
         log("stt", f"\"{text}\"  [dim]({dt:.2f} s)[/dim]")

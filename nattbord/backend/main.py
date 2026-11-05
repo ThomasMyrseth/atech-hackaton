@@ -24,7 +24,7 @@ from backend.plugin import ExternalError, get_plugins, route_event
 from backend.room import Room
 from backend.stt import STT
 
-IGNORE_KEYS = {"mic_level", "dist_min_distance", "btn"}
+IGNORE_KEYS = {"mic_level", "knob", "knob_btn"}
 
 
 class App:
@@ -80,6 +80,11 @@ class App:
             time.sleep(0.3)
             self.speaking = False
 
+    def listen_once(self) -> None:
+        """Opens the mic once: we just asked something, and a quiet answer may stay under the sound threshold."""
+        if self.audio_in == "device":
+            self.device.action("listen_now")
+
     # ------------------------------------------------------------- one utterance
     def handle_utterance(self, pcm, t_end: float, source: str) -> None:
         dur = len(pcm) / 16000
@@ -120,7 +125,7 @@ class App:
     # ---------------------------------------------------------------- events
     def on_event(self, ev) -> None:
         key, val = ev.key, ev.value
-        if route_event(self.plugins, key, val):  # before IGNORE_KEYS: games need btn and mic_level
+        if route_event(self.plugins, key, val):  # before IGNORE_KEYS: games need knob_btn and mic_level
             return
         if key in IGNORE_KEYS:
             return
@@ -198,10 +203,13 @@ class App:
                     text = self.assistant.morning_routine()
                     console.print(f"[bold yellow]   ☀️  {text}[/bold yellow]")
                     self.say(text)
+                    self.listen_once()
                 elif job[0] == "greet":
                     hour = datetime.now(self.tz).hour
                     greeting = "Good morning" if hour < 10 else "Hi" if hour < 18 else "Good evening"
                     self.say(f"{greeting}! Let me know if you need anything.")
+                if any([p.after_turn(self.say) for p in self.plugins]):  # a list, so every plugin runs
+                    self.listen_once()
             except Exception as e:  # noqa: BLE001 – the demo must survive everything
                 log("warn", f"job {job[0]} failed: {e!r}")
                 self.device.action("face", "idle")
@@ -209,6 +217,7 @@ class App:
     def run(self) -> None:
         epoch = int(time.time())
         self.device.action("hello", epoch)
+        self.device.action("game_mode", "0")  # a crash mid-game must not leave the knob as a morse key
         thr = self.cfg.mic_threshold if self.audio_in == "device" else 32767
         self.device.action("set_threshold", thr)
         self.device.action("speaker_set_volume", float(os.getenv("SPEAKER_VOLUME", "0.85")))
@@ -241,7 +250,7 @@ def main() -> None:
     p.add_argument("--no-board", action="store_true", help="run without a board (laptop mic and speaker)")
     p.add_argument("--greet", action="store_true", help="greet when someone arrives after >2 min away")
     p.add_argument("--save-audio", action="store_true", help="save the last utterance in data/")
-    p.add_argument("--diag", action="store_true", help="show distance and mic level every 2 s (calibration)")
+    p.add_argument("--diag", action="store_true", help="show mic level every 2 s (calibration)")
     app = App(p.parse_args())
     try:
         app.run()

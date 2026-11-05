@@ -6,16 +6,16 @@ modules:
   - {id: microphone,      instance: mic,     ports: [3, 4]}
   - {id: st7735_tft,      instance: tft,     ports: [5, 6]}
   - {id: aht20,           instance: aht20,   port: 7}
-  - {id: distance_sensor, instance: dist,    port: 9}
-  - {id: neopixel,        instance: led,     port: 10}
-  - {id: button,          instance: btn,     port: 11}
+  - {id: rotary_encoder,  instance: knob,    ports: [9, 10]}   # trykk ned = knapp og morsenøkkel
+  - {id: neopixel,        instance: led,     port: 11}
 code:
   globals: |
     // ===================== Nattbordsassistent: firmware =====================
     // Events ut (custom): presence, gesture, listen, audio_chunk, audio_end,
-    //                     audio_cancel, alarm
+    //                     audio_cancel, alarm, edge, morse_done
     // Actions inn (custom): hello, set_time, face, led_mode, set_alarm,
-    //                     stop_alarm, set_threshold, set_presence, bench_record
+    //                     stop_alarm, set_threshold, bench_record,
+    //                     listen_now, game_mode, morse
     // Innebygde: speaker_play_pcm, speaker_set_volume, speaker_stop, led_fill ...
     #include <time.h>
     #include <sys/time.h>
@@ -39,13 +39,10 @@ code:
     static Face face = F_IDLE;
     static LedMode ledBase = L_OFF;                // satt av backend
     static uint32_t sunriseStartMs = 0, sunriseDurMs = 0;
-    static bool present = false;
-    static int presenceEnterMm = 500;
     static int threshold = 1500;
     static uint32_t hostSeenMs = 0;                // sist backend sa hello (heartbeat hvert 20. s)
     #define hostSeen (hostSeenMs != 0 && millis() - hostSeenMs < 60000UL)
     static uint32_t muteUntil = 0;
-    static uint32_t lastPresenceMs = 0;
 
     // opptak
     static bool recording = false;
@@ -54,6 +51,15 @@ code:
     static uint32_t recSamples = 0;
     static int recSeq = 0;
     static int recMaxLevel = 0;
+    static uint32_t recWaitMs = 600;               // stillhet tillatt før første lyd i opptaket
+
+    // morsespill: knotten er nøkkel og mikrofonen er av
+    static bool gameMode = false;
+    static String morsePattern;
+    static int morseUnit = 0;
+    static int morsePos = -1;                      // -1 = ledig
+    static uint32_t morseUntil = 0;
+    static bool morseLit = false;
 
     // alarm
     static int alarmMin = -1;                      // minutter etter midnatt, -1 = av
@@ -113,7 +119,7 @@ code:
     }
 
     void startRecording(int kind, uint32_t limitMs) {
-      recording = true; recKind = kind; recLimitMs = limitMs;
+      recording = true; recKind = kind; recLimitMs = limitMs; recWaitMs = 600;
       recStartMs = millis(); lastLoudMs = recStartMs;
       recSamples = 0; recSeq = 0; recMaxLevel = 0;
       uint32_t w = rbWrite;
@@ -143,17 +149,6 @@ code:
     }
 
     bool timeValid() { return time(nullptr) > 1700000000; }
-
-    // Avstand: minste gyldige verdi i midtre 4x4 soner (kantsoner ser ofte kabinettet)
-    static int nearMm = 32767;
-    int computeNear() {
-      int best = 32767;
-      for (int r = 2; r <= 5; r++) for (int c = 2; c <= 5; c++) {
-        int d = dist.getDistance(r * 8 + c);
-        if (d >= 80 && d < best) best = d;
-      }
-      return best;
-    }
 
     void setEpoch(const String& v) {
       long long e = atoll(v.c_str());
@@ -218,6 +213,7 @@ code:
     static const int PERIM[8] = {0, 1, 2, 5, 8, 7, 6, 3};
     void ledAll(int r, int g, int b) { led.setAll(r, g, b); }
     void drawLeds() {
+      if (gameMode) return;                        // morsespilleren eier griden
       uint32_t ms = millis();
       LedMode m = ledBase;
       if (recording) m = L_LISTEN;
@@ -269,7 +265,7 @@ code:
     void stopAlarm(const char* why) {
       if (alarmRinging) { alarmRinging = false; speaker.stop(); evStr("state", "alarm", "stopped"); }
       sunriseDurMs = 0;
-      face = present ? F_IDLE : F_SLEEP;
+      face = F_IDLE;
     }
     void checkAlarm() {
       if (alarmMin < 0 || !timeValid()) return;
@@ -317,11 +313,10 @@ code:
     alarmSunriseMin = prefs.getInt("asun", 15);
     prefs.end();
     led.clear(); led.show();
+    knob.enableRing(false);          // morselyset er griden, ringen skal ikke forstyrre
 
   loop: |
-    static uint32_t tPresence = 0, tFace = 0, tLed = 0, tAlarm = 0, tLevel = 0;
-    static int nearCount = 0;
-    static uint32_t farSince = 0;
+    static uint32_t tFace = 0, tLed = 0, tAlarm = 0, tLevel = 0;
     static bool btnDown = false, btnSwallow = false;
     static uint32_t btnDownMs = 0;
     static Face lastFace = F_IDLE;
@@ -334,7 +329,7 @@ code:
         bool wasSeen = hostSeen;
         setEpoch(v); hostSeenMs = millis(); atechDone();
         if (!wasSeen) {
-          evStr("state", "presence", present ? "enter" : "leave");
+          evStr("state", "presence", "enter");     // ingen avstandssensor: alltid til stede
           char ab[48]; if (alarmMin >= 0) snprintf(ab, sizeof(ab), "set %02d:%02d/%d", alarmMin / 60, alarmMin % 60, alarmSunriseMin); else strcpy(ab, "off");
           evStr("state", "alarm", ab);
         }
@@ -374,61 +369,95 @@ code:
       }
       else if (a == "stop_alarm") { stopAlarm("action"); atechDone(); }
       else if (a == "set_threshold") { threshold = max(50L, v.toInt()); atechDone(); }
-      else if (a == "set_presence") { presenceEnterMm = max(100L, v.toInt()); atechDone(); }
-      else if (a == "dist_grid") {
-        String s = "["; for (int i = 0; i < 64; i++) { s += String(dist.getDistance(i)); if (i < 63) s += ","; } s += "]";
-        evRaw("log", "dist_grid", s.c_str()); atechDone();
-      }
       else if (a == "bench_record") {
         int secs = v.toInt(); if (secs < 1) secs = 5; if (secs > 10) secs = 10;
         if (recording) stopRecording("bench", true);
         startRecording(3, secs * 1000UL); atechDone();
       }
+      else if (a == "listen_now") {
+        // Kind forblir vad: en mikrofon som åpner seg selv kan lese, men aldri skrive.
+        if (!recording && !gameMode) { startRecording(0, 8000); recWaitMs = 5000; }
+        atechDone();
+      }
+      else if (a == "game_mode") {
+        gameMode = v == "1";
+        if (gameMode && recording) stopRecording("game", true);
+        btnSwallow = true;                         // en knapp som holdes nå skal ikke utløse noe
+        morsePos = -1; morseLit = false;
+        led.clear(); led.show();
+        atechDone();
+      }
+      else if (a == "morse") {
+        // Verdi: "<unit_ms>:<mønster>". atechDone() tømmer verdien, så les den først.
+        int colon = v.indexOf(':');
+        if (morsePos >= 0) { atechFail("busy"); }
+        else if (!gameMode) { atechFail("needs game_mode"); }
+        else if (colon < 1 || v.toInt() <= 0) { atechFail("expected unit_ms:pattern"); }
+        else {
+          morseUnit = v.toInt();
+          morsePattern = v.substring(colon + 1);
+          morsePos = 0; morseLit = false; morseUntil = millis();
+        }
+        if (atech_action.length()) atechDone();
+      }
     }
 
-    // ---------- presence (hysterese) ----------
-    if (now - tPresence >= 100) {
-      tPresence = now;
-      int d = computeNear();
-      nearMm = d;
-      bool valid = d > 0 && d < 32767;
-      if (valid && d < presenceEnterMm) { nearCount++; farSince = 0; }
-      else { nearCount = 0; if (!farSince) farSince = now; }
-      if (!present && nearCount >= 3) {
-        present = true; lastPresenceMs = now;
-        if (face == F_SLEEP && !alarmRinging) face = F_IDLE;
-        evStr("state", "presence", "enter");
-      } else if (present && farSince && (!valid || d > presenceEnterMm + 200) && now - farSince > 3000) {
-        present = false; lastPresenceMs = now;
-        evStr("state", "presence", "leave");
+    // ---------- morse på griden (millis-drevet, kjører mens backend snakker) ----------
+    if (morsePos >= 0 && (long)(millis() - morseUntil) >= 0) {
+      if (morseLit) {
+        led.clear(); led.show();
+        morseLit = false;
+        int gap = 1;                               // mørke enheter: 1 i bokstav, 3 mellom bokstaver, 7 mellom ord
+        while (morsePos < (int)morsePattern.length() && morsePattern[morsePos] != '.' && morsePattern[morsePos] != '-') {
+          gap = max(gap, morsePattern[morsePos] == '/' ? 7 : 3);
+          morsePos++;
+        }
+        morseUntil += gap * morseUnit;
+      } else if (morsePos >= (int)morsePattern.length()) {
+        morsePos = -1;
+        evRaw("state", "morse_done", "1");
+      } else {
+        led.setAll(255, 255, 255); led.show();
+        morseLit = true;
+        morseUntil += (morsePattern[morsePos++] == '-' ? 3 : 1) * morseUnit;
       }
-      if (!present && face == F_IDLE && now - lastPresenceMs > 30000) face = F_SLEEP;
     }
 
     // ---------- demping etter tale ----------
     if (lastFace == F_TALK && face != F_TALK) muteUntil = now + 500;
     lastFace = face;
 
-    // ---------- knapp ----------
-    bool down = btn.isPressed();
-    if (down && !btnDown) {
-      btnDown = true; btnDownMs = now; btnSwallow = false;
-      if (alarmRinging || sunriseDurMs) { stopAlarm("button"); btnSwallow = true; }
-    }
-    if (btnDown && down && !btnSwallow && hostSeen) {
-      if (!recording && now - btnDownMs > 400 && face != F_TALK) startRecording(1, 10000);
-    }
-    if (!down && btnDown) {
-      btnDown = false;
-      uint32_t held = now - btnDownMs;
-      if (!btnSwallow) {
-        if (recording && recKind == 1) {
-          if (held > 3000 && recMaxLevel < threshold) { stopRecording("demo", true); evStr("button", "gesture", "demo"); }
-          else stopRecording("button", false);
-        } else if (held <= 400) {
-          evStr("button", "gesture", "press");
-          if (recording && recKind == 0) recKind = 2;     // trykk under auto-opptak = direkte forespørsel
-          else if (hostSeen && !recording && face != F_TALK) startRecording(2, 6000);
+    // ---------- knapp (trykk ned på knotten) ----------
+    // isPressed() er rå digitalRead: uten sperra blir et sprett i bryteren to morsetrykk.
+    static bool down = false;
+    static uint32_t keyEdgeMs = 0;
+    if (knob.isPressed() != down && now - keyEdgeMs >= 20) { down = !down; keyEdgeMs = now; }
+    if (gameMode) {
+      // Stemples her fordi jitter i USB og Python ellers ødelegger lengden på prikker og streker.
+      if (down != btnDown) {
+        btnDown = down;
+        Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"button\",\"key\":\"edge\",\"value\":\"%d:%lu\"}}\n", down ? 1 : 0, millis());
+      }
+    } else {
+      if (down && !btnDown) {
+        btnDown = true; btnDownMs = now; btnSwallow = false;
+        if (alarmRinging || sunriseDurMs) { stopAlarm("button"); btnSwallow = true; }
+      }
+      if (btnDown && down && !btnSwallow && hostSeen) {
+        if (!recording && now - btnDownMs > 400 && face != F_TALK) startRecording(1, 10000);
+      }
+      if (!down && btnDown) {
+        btnDown = false;
+        uint32_t held = now - btnDownMs;
+        if (!btnSwallow) {
+          if (recording && recKind == 1) {
+            if (held > 3000 && recMaxLevel < threshold) { stopRecording("demo", true); evStr("button", "gesture", "demo"); }
+            else stopRecording("button", false);
+          } else if (held <= 400) {
+            evStr("button", "gesture", "press");
+            if (recording && recKind == 0) recKind = 2;     // trykk under auto-opptak = direkte forespørsel
+            else if (hostSeen && !recording && face != F_TALK) startRecording(2, 6000);
+          }
         }
       }
     }
@@ -445,11 +474,11 @@ code:
       else if (recKind == 1) { if (dur >= recLimitMs) stopRecording("max", false); }
       else {
         if (dur >= recLimitMs) stopRecording("max", false);
-        else if (nowv - lastLoudMs > 1000 && dur > 600) stopRecording("silence", false);
+        else if (nowv - lastLoudMs > 1000 && dur > (lastLoudMs == recStartMs ? recWaitMs : 600)) stopRecording("silence", false);
       }
     } else {
-      bool canListen = hostSeen && present && now > muteUntil && face != F_THINK && face != F_TALK
-                       && !alarmRinging && !btnDown;
+      bool canListen = hostSeen && now > muteUntil && face != F_THINK && face != F_TALK
+                       && !alarmRinging && !btnDown && !gameMode;
       if (canListen && level > threshold) startRecording(0, 6000);
     }
 
@@ -458,9 +487,8 @@ code:
     if (now - tDiag >= 2000) {
       tDiag = now;
       char db[160];
-      snprintf(db, sizeof(db), "{\"near\":%d,\"min\":%d,\"level\":%d,\"micL\":%d,\"micR\":%d,\"ch\":%d,\"thr\":%d,\"present\":%s}",
-               nearMm, (int)dist.getMinDistance(), level, (int)mic.dbgRmsL, (int)mic.dbgRmsR, mic.activeChannel,
-               threshold, present ? "true" : "false");
+      snprintf(db, sizeof(db), "{\"level\":%d,\"micL\":%d,\"micR\":%d,\"ch\":%d,\"thr\":%d}",
+               level, (int)mic.dbgRmsL, (int)mic.dbgRmsR, mic.activeChannel, threshold);
       evRaw("log", "diag", db);
     }
 

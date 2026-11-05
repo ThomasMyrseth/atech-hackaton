@@ -30,6 +30,7 @@ class Plugin:
     name = ""
     tools: list[dict] = []    # Anthropic tools, strict, same shape as agent.TOOLS
     writes: set[str] = set()  # tools that change something outside; need a button press
+    fast: set[str] = set()    # tools whose reply is finished in the same turn: skips the second Claude round
 
     def call(self, tool: str, args: dict) -> str:
         """Runs on the worker thread. Returns JSON text for the model. An exception = an error to the model."""
@@ -41,6 +42,11 @@ class Plugin:
 
     def handle_event(self, key: str, value) -> bool:
         """Runs on the thread that reads from the board, and must never block. True = nobody else sees the event."""
+        return False
+
+    def after_turn(self, say) -> bool:
+        """Runs on the worker thread after each job, once speech is done. Can take long: other jobs wait.
+        True = the plugin talked to the user, so the mic opens once for their reply."""
         return False
 
 
@@ -77,5 +83,6 @@ def request_json(session, method: str, url: str, **kw) -> dict:
 def get_plugins(cfg, device) -> list[Plugin]:
     """The registry: one line per plugin. device is passed so a game can drive the board."""
     from .calendar_backend import CalendarPlugin, get_calendar  # here to avoid an import cycle
+    from .morse_game import MorseGame
 
-    return [CalendarPlugin(get_calendar(cfg), cfg.tz)]
+    return [CalendarPlugin(get_calendar(cfg), cfg.tz), MorseGame(device)]
