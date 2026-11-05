@@ -1,0 +1,47 @@
+# Simulation data for the Atech `microphone` module, read by `atech.sim`
+# (`atech sim-assets`). Frames and every field: src/atech/docs/sim_assets.md.
+# Asset frame: metres, origin at the centre of the bottom (mounting) face,
+# +z out of the top face, +x along the long side.
+#
+# Box sizes are the bounds of Atech's production CAD (atechdotdev/atech-module-renders
+# v1.5, glb_plain/microphone.glb, converted to +z up). The CAD footprint is centred
+# 0.15 mm toward -x; the boxes ignore that. `atech sim-assets --meshes/--fetch`
+# uses that CAD for the visuals. Atech has not published masses: the mass, colours,
+# connector, physics material and device frames are guesses, marked PLACEHOLDER.
+#
+# Sensor: ICS-43434 I2S MEMS microphone. Spans two ports.
+schema: 1
+
+size_m: [0.0395, 0.0195, 0.01084]  # CAD: atech-module-renders v1.5 glb_plain/microphone.glb bounds
+mass_kg: 0.012                  # PLACEHOLDER: replace with Atech module datasheet
+
+colors:                          # PLACEHOLDER: replace with Atech module datasheet
+  body: [0.12, 0.13, 0.15, 1]
+  metal: [0.75, 0.75, 0.78, 1]
+
+connector:                       # PLACEHOLDER: replace with Atech module datasheet
+  # Mates with the board's port frame: centre of the bottom face.
+  pos_m: [0, 0, 0]
+  rpy_deg: [0, 0, 0]
+
+physics_material:                # PLACEHOLDER: replace with Atech module datasheet
+  static_friction: 0.5
+  dynamic_friction: 0.4
+  restitution: 0.1
+
+sensor:
+  type: microphone
+  chip: ICS-43434
+  frame:                          # sound port, facing +z   # PLACEHOLDER: replace with Atech module datasheet
+    pos_m: [0, 0, 0.01084]
+    rpy_deg: [0, 0, 0]
+  sample_rate_hz: 16000           # catalog
+  bits_per_sample: 24             # catalog
+
+semantic:
+  # Wikidata Q-codes (SimReady SL.003), checked on wikidata.org.
+  wikidata_qcode: [Q46384]   # microphone
+  class: [microphone, sensor]
+
+# Fields above that are guesses, not Atech data (exported as atech:placeholders).
+placeholders: [mass_kg, colors, connector, physics_material, sensor.frame]

@@ -15,7 +15,7 @@ from typing import Optional
 from backend.log import log
 
 # Actions som ikke skal spamme loggen
-_QUIET = {"speaker_play_pcm"}
+_QUIET = {"speaker_play_pcm", "hello"}
 
 
 def _short(v) -> str:

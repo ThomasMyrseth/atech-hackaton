@@ -1,5 +1,6 @@
 name: nattbord
 board: 14port
+modules_path: ./my_modules        # microphone: lokal kopi som velger aktiv I2S-kanal automatisk
 modules:
   - {id: speaker,         instance: speaker, ports: [1, 2]}
   - {id: microphone,      instance: mic,     ports: [3, 4]}
@@ -41,7 +42,8 @@ code:
     static bool present = false;
     static int presenceEnterMm = 500;
     static int threshold = 1500;
-    static bool hostSeen = false;                  // backend har sagt hello
+    static uint32_t hostSeenMs = 0;                // sist backend sa hello (heartbeat hvert 20. s)
+    #define hostSeen (hostSeenMs != 0 && millis() - hostSeenMs < 60000UL)
     static uint32_t muteUntil = 0;
     static uint32_t lastPresenceMs = 0;
 
@@ -69,6 +71,21 @@ code:
       Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"%s\",\"key\":\"%s\",\"value\":\"%s\"}}\n", type, key, s);
     }
 
+    // Generert kode har TX-timeout 0 og 256 B buffer: store linjer kuttes. Vent på plass (maks 60 ms).
+    void serialWriteAll(const uint8_t* p, size_t n) {
+      uint32_t t0 = millis();
+      while (n) {
+        int space = Serial.availableForWrite();
+        if (space > 0) {
+          size_t w = Serial.write(p, min((size_t)space, n));
+          p += w; n -= w;
+        } else {
+          if (millis() - t0 > 60) return;
+          delay(1);
+        }
+      }
+    }
+
     static char chunkLine[3400];
     static int16_t chunkBuf[1024];
     void sendChunk(const int16_t* s, int n) {
@@ -79,7 +96,7 @@ code:
                             (const unsigned char*)s, n * 2);
       p += olen;
       p += snprintf(chunkLine + p, sizeof(chunkLine) - p, "\"}}}\n");
-      Serial.write((const uint8_t*)chunkLine, p);
+      serialWriteAll((const uint8_t*)chunkLine, p);
     }
 
     // send alt som ligger klart i ringbufferen (biter på 1024 samples)
@@ -125,6 +142,17 @@ code:
     }
 
     bool timeValid() { return time(nullptr) > 1700000000; }
+
+    // Avstand: minste gyldige verdi i midtre 4x4 soner (kantsoner ser ofte kabinettet)
+    static int nearMm = 32767;
+    int computeNear() {
+      int best = 32767;
+      for (int r = 2; r <= 5; r++) for (int c = 2; c <= 5; c++) {
+        int d = dist.getDistance(r * 8 + c);
+        if (d >= 80 && d < best) best = d;
+      }
+      return best;
+    }
 
     void setEpoch(const String& v) {
       long long e = atoll(v.c_str());
@@ -278,6 +306,7 @@ code:
     }
 
   setup: |
+    Serial.setTxBufferSize(16384);   // plass til lydbiter (ca. 2,8 KB per linje)
     mic.onAudio(onMic, nullptr);
     speaker.setVolume(0.6f);
     setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
@@ -300,10 +329,14 @@ code:
     // ---------- actions fra backend ----------
     if (atech_action.length()) {
       const String& a = atech_action; const String& v = atech_value;
-      if (a == "hello") { setEpoch(v); hostSeen = true; atechDone();
-        evStr("state", "presence", present ? "enter" : "leave");
-        char ab[48]; if (alarmMin >= 0) snprintf(ab, sizeof(ab), "set %02d:%02d/%d", alarmMin / 60, alarmMin % 60, alarmSunriseMin); else strcpy(ab, "off");
-        evStr("state", "alarm", ab);
+      if (a == "hello") {
+        bool wasSeen = hostSeen;
+        setEpoch(v); hostSeenMs = millis(); atechDone();
+        if (!wasSeen) {
+          evStr("state", "presence", present ? "enter" : "leave");
+          char ab[48]; if (alarmMin >= 0) snprintf(ab, sizeof(ab), "set %02d:%02d/%d", alarmMin / 60, alarmMin % 60, alarmSunriseMin); else strcpy(ab, "off");
+          evStr("state", "alarm", ab);
+        }
       }
       else if (a == "set_time") { setEpoch(v); atechDone(); }
       else if (a == "face") {
@@ -341,6 +374,10 @@ code:
       else if (a == "stop_alarm") { stopAlarm("action"); atechDone(); }
       else if (a == "set_threshold") { threshold = max(50L, v.toInt()); atechDone(); }
       else if (a == "set_presence") { presenceEnterMm = max(100L, v.toInt()); atechDone(); }
+      else if (a == "dist_grid") {
+        String s = "["; for (int i = 0; i < 64; i++) { s += String(dist.getDistance(i)); if (i < 63) s += ","; } s += "]";
+        evRaw("log", "dist_grid", s.c_str()); atechDone();
+      }
       else if (a == "bench_record") {
         int secs = v.toInt(); if (secs < 1) secs = 5; if (secs > 10) secs = 10;
         if (recording) stopRecording("bench", true);
@@ -351,7 +388,8 @@ code:
     // ---------- presence (hysterese) ----------
     if (now - tPresence >= 100) {
       tPresence = now;
-      int d = dist.getMinDistance();
+      int d = computeNear();
+      nearMm = d;
       bool valid = d > 0 && d < 32767;
       if (valid && d < presenceEnterMm) { nearCount++; farSince = 0; }
       else { nearCount = 0; if (!farSince) farSince = now; }
@@ -396,20 +434,32 @@ code:
     // ---------- lytting (VAD) ----------
     int level = mic.getSoundLevel();
     if (recording) {
+      uint32_t nowv = millis();          // ikke `now`: opptaket kan ha startet senere i denne runden
       if (level > recMaxLevel) recMaxLevel = level;
-      if (level > threshold * 6 / 10) lastLoudMs = now;
+      if (level > threshold * 6 / 10) lastLoudMs = nowv;
       pumpAudio(false);
-      uint32_t dur = now - recStartMs;
+      uint32_t dur = nowv - recStartMs;
       if (recKind == 3) { if (dur >= recLimitMs) stopRecording("bench", false); }
       else if (recKind == 1) { if (dur >= recLimitMs) stopRecording("max", false); }
       else {
         if (dur >= recLimitMs) stopRecording("max", false);
-        else if (now - lastLoudMs > 1000 && dur > 600) stopRecording("silence", false);
+        else if (nowv - lastLoudMs > 1000 && dur > 600) stopRecording("silence", false);
       }
     } else {
       bool canListen = hostSeen && present && now > muteUntil && face != F_THINK && face != F_TALK
                        && !alarmRinging && !btnDown;
       if (canListen && level > threshold) startRecording(0, 6000);
+    }
+
+    // ---------- diagnose hvert 2. s (kalibrering på stedet) ----------
+    static uint32_t tDiag = 0;
+    if (now - tDiag >= 2000) {
+      tDiag = now;
+      char db[160];
+      snprintf(db, sizeof(db), "{\"near\":%d,\"min\":%d,\"level\":%d,\"micL\":%d,\"micR\":%d,\"ch\":%d,\"thr\":%d,\"present\":%s}",
+               nearMm, (int)dist.getMinDistance(), level, (int)mic.dbgRmsL, (int)mic.dbgRmsR, mic.activeChannel,
+               threshold, present ? "true" : "false");
+      evRaw("log", "diag", db);
     }
 
     // ---------- alarm, skjerm, LED ----------

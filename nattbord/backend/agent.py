@@ -158,9 +158,18 @@ class Assistant:
             return self.history[:-1] + [merged]
         return self.history + [msg]
 
-    def respond(self, user_text: str) -> str:
-        msg = self._user_msg(f"{self._now_line()}\n{self._context_line()}\n{user_text}")
+    AMBIENT_NOTE = ("(Fanget opp automatisk av mikrofonen og kan være bakgrunnsprat i rommet. Hvis teksten ikke "
+                    "er rettet til deg, er uforståelig, på et annet språk, eller ikke gir mening som noe man sier til "
+                    "en nattbordsassistent, svar KUN med ordet IGNORER.)")
+
+    def respond(self, user_text: str, ambient: bool = False) -> str:
+        """ambient=True: opptaket startet av seg selv (lydterskel), ikke via knapp. Returnerer "" hvis ignorert."""
+        note = f"\n{self.AMBIENT_NOTE}" if ambient else ""
+        msg = self._user_msg(f"{self._now_line()}\n{self._context_line()}{note}\n{user_text}")
         text, msgs = self._run(self._with_history(msg))
+        if ambient and text.strip().upper().strip(".!«» ").startswith("IGNORER"):
+            log("agent", "[dim]ignorert (bakgrunnsprat)[/dim]")
+            return ""
         if msgs is not None:
             self.history = msgs
             self._trim()

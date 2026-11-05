@@ -92,8 +92,11 @@ class App:
             self.device.action("face", "idle")
             return
         t1 = time.monotonic()
-        reply = self.assistant.respond(text)
+        reply = self.assistant.respond(text, ambient=(source in ("vad", "laptop")))
         t2 = time.monotonic()
+        if not reply:
+            self.device.action("face", "idle")
+            return
         console.print(f"[bold green]   🤖 {reply}[/bold green]")
         self.say(reply)
         log("time", f"slutt på tale → svar starter ≈ {t2 - t_end + 0.3:.1f} s "
@@ -115,6 +118,8 @@ class App:
         if self.room.update(key, val):
             return
         if key == "presence":
+            if (val == "enter") == self.present:
+                return  # ingen endring (f.eks. synk etter hello)
             log("presence", f"{'👋 til stede' if val == 'enter' else 'borte'}")
             if val == "enter":
                 away = time.monotonic() - self.absent_since
@@ -135,10 +140,13 @@ class App:
             log("audio", f"[dim]opptak forkastet ({val})[/dim]")
             self.assembler.reset()
         elif key == "audio_end":
-            up = (time.monotonic() - self.assembler.t_last) if self.assembler.t_last else 0
+            kind = self.assembler.kind or "vad"
             pcm = self.assembler.finish(val if isinstance(val, dict) else None)
-            log("audio", f"audio_end {val} (siste bit for {up * 1000:.0f} ms siden)")
-            self.jobs.put(("utterance", pcm, time.monotonic(), "brett"))
+            log("audio", f"audio_end ({kind}) {val}")
+            if self.speaking or not self.jobs.empty():
+                log("audio", "[dim]opptatt, forkaster opptaket[/dim]")
+            else:
+                self.jobs.put(("utterance", pcm, time.monotonic(), kind))
         elif key == "gesture":
             log("button", f"knapp: {val}")
             if val == "demo":
@@ -147,6 +155,9 @@ class App:
                 self.laptop.force.set()
         elif key == "alarm":
             log("routine", f"⏰ alarm: {val}")
+        elif key == "diag":
+            if self.args.diag:
+                log("board", f"[dim]diag {val}[/dim]")
         else:
             log("board", f"[dim]{ev.type}/{key} = {str(val)[:80]}[/dim]")
 
@@ -203,6 +214,8 @@ class App:
             if time.monotonic() - last_sched > 15:
                 last_sched = time.monotonic()
                 self.check_schedule()
+                if not self.speaking:  # heartbeat: brettet strømmer bare lyd når vi lever
+                    self.device.action("hello", int(time.time()))
 
 
 def main() -> None:
@@ -210,6 +223,7 @@ def main() -> None:
     p.add_argument("--no-board", action="store_true", help="kjør uten brett (laptop-mik og høyttaler)")
     p.add_argument("--greet", action="store_true", help="hils når noen kommer etter >2 min borte")
     p.add_argument("--save-audio", action="store_true", help="lagre siste ytring i data/")
+    p.add_argument("--diag", action="store_true", help="vis avstand og mikrofonnivå hvert 2. s (kalibrering)")
     app = App(p.parse_args())
     try:
         app.run()

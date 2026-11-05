@@ -28,7 +28,7 @@ class Config:
     audio_out: str = "device"      # device | laptop
     evening_time: str = "22:30"
     tz: str = "Europe/Oslo"
-    mic_threshold: int = 1500
+    mic_threshold: int = 2500
 
 
 def load_config() -> Config:
@@ -45,5 +45,5 @@ def load_config() -> Config:
         audio_out=_env("AUDIO_OUT", "device"),
         evening_time=_env("EVENING_TIME", "22:30"),
         tz=_env("TZ_NAME", "Europe/Oslo"),
-        mic_threshold=int(_env("MIC_THRESHOLD", "1500")),
+        mic_threshold=int(_env("MIC_THRESHOLD", "2500")),
     )
