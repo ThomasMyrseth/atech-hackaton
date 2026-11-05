@@ -204,7 +204,9 @@ class App:
                     text = self.assistant.morning_routine()
                     console.print(f"[bold yellow]   ☀️  {text}[/bold yellow]")
                     self.say(text)
-                    self.listen_once()
+                    # shortcut: the demo plays as if the user said "sure", swap for self.listen_once() to hear the answer.
+                    self.say("Great, watch the light.")
+                    self.assistant.routes["start_morse_game"].call("start_morse_game", {})
                 elif job[0] == "greet":
                     hour = datetime.now(self.tz).hour
                     greeting = "Good morning" if hour < 10 else "Hi" if hour < 18 else "Good evening"

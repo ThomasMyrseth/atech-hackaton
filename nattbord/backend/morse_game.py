@@ -20,6 +20,11 @@ KEY_DONE_S = 2.5  # a pause this long ends the answer
 FIRST_PRESS_S = 20.0
 
 
+def symbols(pattern: str) -> str:
+    """Dots and dashes only: a sleepy player's letter gaps are too uneven to judge."""
+    return pattern.replace(" ", "").replace("/", "")
+
+
 class MorseGame(Plugin):
     name = "morse game"
     fast = {"start_morse_game"}
@@ -60,20 +65,21 @@ class MorseGame(Plugin):
                 raise RuntimeError("the board refused game mode")
             self._blink()
             say("Now key the opposite.")
-            keyed = self._keyed()
+            text, pattern = self._keyed()
         except RuntimeError as e:
             log("warn", f"morse game: {e}")
             say("Sorry, the light isn't answering.")
             return True
         finally:
             self.device.action("game_mode", "0")
-        self.result = f"Morse game: the answer was {ANSWER} and the user keyed {keyed or 'nothing'}."
+        right = symbols(pattern) == symbols(morse.encode(ANSWER))
+        self.result = f"Morse game: the answer was {ANSWER} and the user keyed {ANSWER if right else text or 'nothing'}."
         log("game", self.result)
         reveal = f"The light said {WORD.lower()}, so the answer was {ANSWER.lower()}."
-        if keyed == ANSWER:
+        if right:
             say(f"Yes, {ANSWER.lower()}! Nicely keyed.")
         else:
-            say(f"{'Not quite' if keyed else 'No answer this time'}. {reveal}")
+            say(f"{'Not quite' if pattern else 'No answer this time'}. {reveal}")
         return True
 
     def _next(self, deadline: float):
@@ -98,7 +104,7 @@ class MorseGame(Plugin):
                 return
         raise RuntimeError("the board never finished blinking")
 
-    def _keyed(self) -> str:
+    def _keyed(self) -> tuple[str, str]:
         """Collect presses until the key goes quiet, then decode them on board time."""
         self._drain()  # presses during the speech are not an answer
         presses, down = [], None
@@ -113,4 +119,4 @@ class MorseGame(Plugin):
                 presses.append((down, int(at)))
                 down = None
             deadline = time.monotonic() + KEY_DONE_S
-        return morse.decode(presses)[0].replace(" ", "")  # a long pause between letters decodes as a word gap
+        return morse.decode(presses)[:2]

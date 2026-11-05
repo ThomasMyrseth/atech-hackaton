@@ -441,6 +441,10 @@ code:
       if (down != btnDown) {
         btnDown = down;
         Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"button\",\"key\":\"edge\",\"value\":\"%d:%lu\"}}\n", down ? 1 : 0, millis());
+        if (morsePos < 0) {                        // lyset følger nøkkelen, men aldri over ordet som blinker
+          if (down) led.setAll(255, 255, 255); else led.clear();
+          led.show();
+        }
       }
     } else {
       if (down && !btnDown) {

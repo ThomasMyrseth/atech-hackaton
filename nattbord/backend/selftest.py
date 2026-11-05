@@ -405,6 +405,13 @@ def test_morse_game() -> None:
     late = key("BL", 12, 0, rng) + [(down + 9000, up + 9000) for down, up in key("UE", 12, 0, rng)]
     assert play_round(late)[2][-1].startswith("Yes"), "a long pause between letters still counts"
 
+    now, slow = 0, []  # the real run: right symbols, every gap long enough to split them into letters
+    for symbol in "-....-....-.":
+        slow.append((now, now + (300 if symbol == "-" else 100)))
+        now = slow[-1][1] + 400
+    board, game, said = play_round(slow)
+    assert said[-1].startswith("Yes") and "keyed BLUE" in game.context(), "letter gaps do not count against the player"
+
     board, game, said = play_round(key("RED", 12, 0.1, rng))
     assert "answer was blue" in said[-1] and "keyed RED" in game.context()
 
