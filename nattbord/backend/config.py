@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent  # nattbord/
 DATA_DIR = ROOT / "data"
 
+UKEDAGER = ["mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag"]
+
 
 def _env(name: str, default: str) -> str:
     val = os.environ.get(name, default)
@@ -22,6 +24,8 @@ class Config:
     thinking: str = "off"          # off | adaptive  (off = raskest, trygt å trimme historikk)
     effort: str = "low"            # low | medium | high
     calendar: str = "demo"         # demo | google
+    google_calendar_id: str = ""   # kalenderens id, for en vanlig Gmail-kalender e-postadressen
+    google_key_file: str = "service-account.json"  # relativt til nattbord/
     tts_voice: str = "Nora"
     tts_rate: int = 190
     audio_in: str = "device"       # device | laptop
@@ -39,6 +43,8 @@ def load_config() -> Config:
         thinking=_env("THINKING", "off"),
         effort=_env("EFFORT", "low"),
         calendar=_env("CALENDAR", "demo"),
+        google_calendar_id=_env("GOOGLE_CALENDAR_ID", ""),
+        google_key_file=_env("GOOGLE_KEY_FILE", "service-account.json"),
         tts_voice=_env("TTS_VOICE", "Nora"),
         tts_rate=int(_env("TTS_RATE", "190")),
         audio_in=_env("AUDIO_IN", "device"),

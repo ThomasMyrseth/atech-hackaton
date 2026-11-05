@@ -90,7 +90,7 @@ class LaptopListener:
         self.threshold = threshold
         self.enabled = enabled
         self.silence_s, self.max_s, self.min_s = silence_s, max_s, min_s
-        self.utterances: "queue.Queue[np.ndarray]" = queue.Queue()
+        self.utterances: "queue.Queue[tuple[np.ndarray, bool]]" = queue.Queue()
         self.force = threading.Event()   # knapp: start opptak nå
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True, name="laptop-mic")
@@ -120,6 +120,7 @@ class LaptopListener:
                     preroll.append(x)
                     preroll = preroll[-10:]  # ~320 ms
                     if self.enabled() and (level > self.threshold or self.force.is_set()):
+                        forced = self.force.is_set()
                         self.force.clear()
                         recording = True
                         rec = list(preroll)
@@ -127,6 +128,9 @@ class LaptopListener:
                         log("audio", f"laptop: opptak starter (nivå {level:.0f})")
                     continue
                 rec.append(x)
+                if self.force.is_set():  # knapp under auto-opptak: direkte forespørsel, som på brettet
+                    self.force.clear()
+                    forced = True
                 if level > self.threshold * 0.6:
                     t_loud = now
                 if now - t_loud > self.silence_s or now - t_start > self.max_s or not self.enabled():
@@ -135,5 +139,5 @@ class LaptopListener:
                     dur = len(pcm) / RATE
                     if dur >= self.min_s:
                         log("audio", f"laptop: ytring {dur:.1f} s")
-                        self.utterances.put(pcm)
+                        self.utterances.put((pcm, forced))
                     preroll = []

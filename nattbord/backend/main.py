@@ -17,10 +17,10 @@ from zoneinfo import ZoneInfo
 from backend import tts
 from backend.agent import Assistant
 from backend.audio_in import ChunkAssembler, LaptopListener, rms, save_wav
-from backend.calendar_backend import get_calendar
 from backend.config import DATA_DIR, load_config
 from backend.device import BoardDevice, LogDevice
 from backend.log import console, log
+from backend.plugin import get_plugins, route_event
 from backend.room import Room
 
 IGNORE_KEYS = {"mic_level", "dist_min_distance", "btn"}
@@ -39,8 +39,8 @@ class App:
             self.room = Room()
         self.audio_in = "laptop" if args.no_board else self.cfg.audio_in
         self.audio_out = "laptop" if args.no_board else self.cfg.audio_out
-        self.calendar = get_calendar(self.cfg)
-        self.assistant = Assistant(self.device, self.room, self.calendar, self.cfg)
+        self.plugins = get_plugins(self.cfg, self.device)
+        self.assistant = Assistant(self.device, self.room, self.plugins, self.cfg)
         from backend.stt import STT  # tar noen sekunder (laster modellen)
         self.stt = STT()
         self.assembler = ChunkAssembler()
@@ -113,6 +113,8 @@ class App:
     # ---------------------------------------------------------------- events
     def on_event(self, ev) -> None:
         key, val = ev.key, ev.value
+        if route_event(self.plugins, key, val):  # før IGNORE_KEYS: spill trenger btn og mic_level
+            return
         if key in IGNORE_KEYS:
             return
         if self.room.update(key, val):
@@ -216,8 +218,8 @@ class App:
                 self.on_event(ev)
             if self.laptop:
                 try:
-                    pcm = self.laptop.utterances.get_nowait()
-                    self.jobs.put(("utterance", pcm, time.monotonic(), "laptop"))
+                    pcm, forced = self.laptop.utterances.get_nowait()
+                    self.jobs.put(("utterance", pcm, time.monotonic(), "tap" if forced else "laptop"))
                 except queue.Empty:
                     pass
             if time.monotonic() - last_sched > 15:

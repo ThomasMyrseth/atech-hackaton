@@ -5,9 +5,9 @@ Kommandoer: /kveld (kveldsrutine), /reset (ny samtale), /stille (tale av/på), /
 import time
 
 from .agent import Assistant
-from .calendar_backend import get_calendar
 from .config import load_config
 from .log import console, log
+from .plugin import get_plugins
 from .room import Room
 from .tts import duration_s, play_laptop, synthesize
 
@@ -32,7 +32,7 @@ def speak(text: str, cfg, muted: bool) -> None:
 def main() -> None:
     cfg = load_config()
     device = LogDevice()
-    assistant = Assistant(device, Room.fake(), get_calendar(cfg), cfg)
+    assistant = Assistant(device, Room.fake(), get_plugins(cfg, device), cfg)
     muted = False
     console.print(f"[bold]Nattbord – tekstmodus[/bold]  modell={cfg.model} thinking={cfg.thinking} "
                   f"effort={cfg.effort} stemme={cfg.tts_voice}")

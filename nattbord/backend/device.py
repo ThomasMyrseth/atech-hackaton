@@ -1,21 +1,36 @@
-"""Brettet over USB (Atech SDK), pluss en logg-enhet for tekstmodus.
-
-Alle enheter har samme grensesnitt:
-    action(key, value="") -> bool      # sender én action, venter på ack
-    play_pcm(pcm: bytes) -> float      # spiller 16 kHz mono s16le, returnerer sekunder brukt
-    recv(timeout) -> Event | None      # neste event fra brettet
-"""
+"""Brettet over USB (Atech SDK), pluss en logg-enhet for tekstmodus. Device er eneste vei til brettet."""
 from __future__ import annotations
 
 import base64
 import threading
 import time
-from typing import Optional
+from typing import Optional, Protocol
 
 from backend.log import log
 
 # Actions som ikke skal spamme loggen
 _QUIET = {"speaker_play_pcm", "hello"}
+
+
+class Device(Protocol):
+    """Grensen rundt brettet. Grensene for hva som kan sendes står i docs/INTERFACE.md.
+
+    play_pcm holder låsen under hele avspillingen, så action venter til talen er ferdig.
+    """
+
+    is_board: bool
+
+    def action(self, key: str, value="") -> bool:
+        """Sender én action og venter på ack. False hvis brettet avviste eller ikke svarte."""
+
+    def play_pcm(self, pcm: bytes) -> float:
+        """Spiller 16 kHz mono s16le og returnerer sekunder brukt."""
+
+    def recv(self, timeout: float = 0.2):
+        """Neste event fra brettet, eller None. Bare hovedløkka skal kalle denne."""
+
+    def close(self) -> None:
+        """Frigjør porten."""
 
 
 def _short(v) -> str:
