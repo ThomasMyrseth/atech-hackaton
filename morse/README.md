@@ -6,7 +6,7 @@ The agent runs on the laptop. The board does the sound, the light and the timing
 
 ## Hardware
 
-14-port board: speaker in ports 1-2, microphone in 13-14, button in 3, LED Grid in 4.
+14-port board: speaker in ports 1-2, microphone in 3-4, button in 11, LED Grid in 10.
 
 ## Setup
 

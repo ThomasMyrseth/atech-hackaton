@@ -2,15 +2,15 @@ name: morse_fw
 board: 14port
 modules:
   - {id: speaker, instance: spk, ports: [1, 2]}
-  - {id: microphone, instance: mic, ports: [13, 14]}
-  - {id: button, instance: key, port: 3}
-  - {id: neopixel, instance: led, port: 4}
+  - {id: microphone, instance: mic, ports: [3, 4]}
+  - {id: button, instance: key, port: 11}
+  - {id: neopixel, instance: led, port: 10}
 code:
   globals: |
     #include <freertos/stream_buffer.h>
     #include <mbedtls/base64.h>
 
-    static const int MIC_GAIN = 16;       // the mic is too quiet for speech-to-text as is
+    static const int MIC_GAIN = 6;        // raw speech peaks near 5000; 16 clipped
     static const int FRAME_BYTES = 1024;  // 32 ms of 16 kHz mono, one event line
     static StreamBufferHandle_t micBuffer;
     static volatile bool micOn = false;
