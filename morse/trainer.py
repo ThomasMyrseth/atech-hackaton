@@ -52,10 +52,11 @@ a speaker, a microphone, a light and a key.
 Everything you write is read aloud, so write short spoken sentences with no markdown, lists \
 or symbols.
 
-Use send_morse whenever morse fits: a quiz, a drill, a surprise message. Say your lead-in \
-first, then call it, for example "Hey Thomas, what am I trying to say?". Never say the answer \
-before Thomas has tried. After send_morse, stop: the next message carries the tool result and \
-the answer together.
+Use send_morse whenever morse fits: a quiz, a drill, a surprise message, a repeat. Put \
+what you want to say before the blink in its say field, for example "Hey Thomas, what am I \
+trying to say?", and write no other text in that turn: text beside a tool call may never be \
+heard. Never say the answer before Thomas has tried. After send_morse, stop: the next message \
+carries the tool result and the answer together.
 
 Thomas's turns arrive tagged [voice] or [morse], and either is a fine way to answer you. A \
 [morse] turn gives what was keyed, the dots and dashes, and the speed, so coach on the actual \
@@ -66,16 +67,17 @@ GREETING = "[session start] Greet Thomas in one sentence, then start with someth
 
 TOOLS = [{
     "name": "send_morse",
-    "description": "Blink text in morse on the light in front of Thomas. Takes letters, digits "
-                   "and . , ? / = only, at most 40 characters.",
+    "description": "Say something aloud, then blink text in morse on the light in front of "
+                   "Thomas. Takes letters, digits and . , ? / = only, at most 40 characters.",
     "eager_input_streaming": True,
     "input_schema": {
         "type": "object",
         "properties": {
+            "say": {"type": "string", "description": "Spoken aloud before the blink."},
             "text": {"type": "string", "description": "What to blink."},
             "wpm": {"type": "integer", "description": "Speed in words per minute, 5 to 25."},
         },
-        "required": ["text", "wpm"],
+        "required": ["say", "text", "wpm"],
     },
 }]
 
@@ -101,7 +103,9 @@ def pcm_chunks(stream):
 def check_morse(args):
     """Validate send_morse input. Returns (pattern, unit_ms), or raises ValueError."""
     # Eager input streaming means the API did not validate this.
-    text, wpm = (args.get("text"), args.get("wpm")) if isinstance(args, dict) else (None, None)
+    say, text, wpm = (args.get(k) if isinstance(args, dict) else None for k in ("say", "text", "wpm"))
+    if not isinstance(say, str) or not say.strip():
+        raise ValueError("say must hold what to speak before the blink")
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_MORSE_CHARS:
         raise ValueError(f"text must be 1 to {MAX_MORSE_CHARS} characters")
     if not isinstance(wpm, int) or not 5 <= wpm <= 25:
@@ -293,6 +297,9 @@ class Trainer:
         result = {"type": "tool_result", "tool_use_id": block.id}
         try:
             pattern, unit = check_morse(block.input)
+            self.speaker.say(block.input["say"].strip())
+            self.speaker.join()
+            print(f"morse: {block.input['text']} at {block.input['wpm']} wpm")
             self._blink(pattern, unit)
         except (ValueError, TimeoutError, ActionRejected, NoAcknowledgement) as error:
             return {**result, "is_error": True, "content": str(error)}
@@ -310,7 +317,7 @@ class Trainer:
 
 def open_stt():
     ws = connect(STT_URL, additional_headers={"xi-api-key": os.environ["ELEVENLABS_API_KEY"]},
-                 close_timeout=1)
+                 close_timeout=1, legacy=True)
     started = json.loads(ws.recv(timeout=5))  # audio sent before this can be lost
     if started.get("message_type") != "session_started":
         raise RuntimeError(f"speech-to-text refused: {started}")
@@ -454,9 +461,11 @@ def selftest_text():
 
 
 def selftest_tool_input():
-    assert check_morse({"text": "SOS", "wpm": 12}) == ("... --- ...", 100)
-    for bad in ({"text": "ø", "wpm": 12}, {"text": "SOS", "wpm": 40}, {"text": "SOS", "wpm": True},
-                {"text": "A" * 41, "wpm": 12}, {"text": "  ", "wpm": 12}, {"wpm": 12}, "SOS"):
+    good = {"say": "Watch this.", "text": "SOS", "wpm": 12}
+    assert check_morse(good) == ("... --- ...", 100)
+    for bad in ({**good, "text": "ø"}, {**good, "wpm": 40}, {**good, "wpm": True},
+                {**good, "text": "A" * 41}, {**good, "text": "  "}, {**good, "say": " "},
+                {"say": "Hi", "wpm": 12}, {"text": "SOS", "wpm": 12}, "SOS"):
         try:
             check_morse(bad)
         except ValueError:
@@ -534,14 +543,19 @@ def selftest_listen():
 
 
 def selftest_agent():
-    # The agent speaks, then blinks. No second request: the mic must open at once.
-    claude = FakeClaude(reply("tool_use", text("Hey Thomas, what am I saying?"),
-                              tool_use("t1", text="SOS", wpm=12)),
+    # The lead-in lives in the tool input: Opus 5.5 can turn text beside a tool call into a
+    # thinking block, which would blink at Thomas in silence. Speech comes first, then the blink.
+    claude = FakeClaude(reply("tool_use", NS(type="thinking", thinking=""),
+                              tool_use("t1", say="Hey Thomas, what am I saying?", text="SOS", wpm=12)),
                         reply("end_turn", text("Well done.")))
     trainer, board, spoken = trainer_with(claude)
     pending = trainer.respond([{"type": "text", "text": "start"}])
     assert spoken == ["Hey Thomas, what am I saying?"]
     assert sent(board, "morse") == ["100:... --- ..."]
+    keys = [action.key for action in board.transport.sent]
+    assert keys.index("spk_play_pcm") < keys.index("morse")
+
+    # No second request: the mic must open at once.
     assert len(claude.requests) == 1
     assert [r["type"] for r in pending] == ["tool_result"] and not pending[0].get("is_error")
 
@@ -551,10 +565,10 @@ def selftest_agent():
     content = claude.requests[1]["messages"][-1]["content"]
     assert [c["type"] for c in content] == ["tool_result", "text"]
     assert content[0]["tool_use_id"] == "t1"
-    assert [b.type for b in claude.requests[1]["messages"][-2]["content"]] == ["text", "tool_use"]
+    assert [b.type for b in claude.requests[1]["messages"][-2]["content"]] == ["thinking", "tool_use"]
 
     # Bad tool input goes straight back to Claude, not to the board.
-    claude = FakeClaude(reply("tool_use", tool_use("t2", text="ø", wpm=12)),
+    claude = FakeClaude(reply("tool_use", tool_use("t2", say="Watch.", text="ø", wpm=12)),
                         reply("end_turn", text("Sorry, plain letters only.")))
     trainer, board, _ = trainer_with(claude)
     assert trainer.respond([{"type": "text", "text": "start"}]) == []
@@ -562,7 +576,7 @@ def selftest_agent():
     assert claude.requests[1]["messages"][-1]["content"][0]["is_error"] is True
 
     # A cut-off tool call must not run, or be replayed in the history.
-    claude = FakeClaude(reply("max_tokens", tool_use("t3", text="SO", wpm=12)),
+    claude = FakeClaude(reply("max_tokens", tool_use("t3", say="Watch.", text="SO", wpm=12)),
                         reply("end_turn", text("Next.")))
     trainer, board, _ = trainer_with(claude)
     assert trainer.respond([{"type": "text", "text": "one"}]) == []
