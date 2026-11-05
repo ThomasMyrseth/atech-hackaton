@@ -70,7 +70,7 @@ class App:
         try:
             self.device.action("face", "talking")
             if self.audio_out == "device" and self.device.is_board:
-                wall = self.device.play_pcm(pcm)
+                wall = self.device.play_pcm(tts.prepare_for_speaker(pcm))
                 log("tts", f"{dur:.1f} s tale på brettet, sendt på {wall:.1f} s (say {t_tts:.2f} s)")
             else:
                 log("tts", f"{dur:.1f} s tale på laptop (say {t_tts:.2f} s)")
@@ -195,11 +195,13 @@ class App:
         self.device.action("hello", epoch)
         thr = self.cfg.mic_threshold if self.audio_in == "device" else 32767
         self.device.action("set_threshold", thr)
+        self.device.action("speaker_set_volume", float(os.getenv("SPEAKER_VOLUME", "0.85")))
         self.device.action("face", "idle")
         threading.Thread(target=self.worker, daemon=True).start()
         if self.laptop:
             self.laptop.start()
-        log("board", f"klar · lyd inn={self.audio_in} ut={self.audio_out} · kalender={self.cfg.calendar}")
+        engine = "elevenlabs" if os.getenv("ELEVENLABS_API_KEY") and os.getenv("TTS_ENGINE", "elevenlabs") != "say" else "say"
+        log("board", f"klar · lyd inn={self.audio_in} ut={self.audio_out} · tale={engine} · kalender={self.cfg.calendar}")
         last_sched = 0.0
         while True:
             ev = self.device.recv(0.1)
