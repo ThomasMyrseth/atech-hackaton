@@ -1,6 +1,6 @@
-"""Tekst til tale → 16 kHz mono s16le PCM.
+"""Text to speech → 16 kHz mono s16le PCM.
 
-ElevenLabs (hvis ELEVENLABS_API_KEY er satt og TTS_ENGINE ikke er "say"), ellers macOS `say`.
+ElevenLabs (if ELEVENLABS_API_KEY is set and TTS_ENGINE is not "say"), otherwise macOS `say`.
 """
 import base64
 import os
@@ -18,9 +18,9 @@ _EMOJI = re.compile(
 
 def clean_for_speech(text: str) -> str:
     t = re.sub(r"```.*?```", " ", text, flags=re.S)
-    t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", t)        # [lenke](url) → lenke
-    t = re.sub(r"[*_`#>|~]+", "", t)                      # markdown-tegn
-    t = re.sub(r"^\s*[-•]\s+", "", t, flags=re.M)         # punktlister
+    t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", t)        # [link](url) → link
+    t = re.sub(r"[*_`#>|~]+", "", t)                      # markdown characters
+    t = re.sub(r"^\s*[-•]\s+", "", t, flags=re.M)         # bullet lists
     t = _EMOJI.sub("", t)
     return re.sub(r"\s+", " ", t).strip()
 
@@ -36,8 +36,8 @@ def _voice_exists(voice: str) -> bool:
 _voice_cache: dict[str, bool] = {}
 
 
-# Standardstemme: premade "Charlotte" (skandinavisk preg). Bytt med ELEVENLABS_VOICE_ID (f.eks. en norsk
-# stemme fra Voice Library, lagt til på kontoen).
+# Default voice: premade "Charlotte". Swap with ELEVENLABS_VOICE_ID (e.g. a voice from the Voice Library,
+# added to the account).
 _EL_DEFAULT_VOICE = "XB0fDUnXU5powFXDhCwa"
 _el_cache: dict[str, bytes] = {}
 
@@ -51,7 +51,7 @@ def _elevenlabs(text: str) -> bytes:
     body = {"text": text, "model_id": model,
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "speed": 1.0}}
     if "v2_5" in model:
-        body["language_code"] = "no"
+        body["language_code"] = "en"
     r = httpx.post(
         f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
         params={"output_format": "pcm_16000"},
@@ -65,8 +65,8 @@ def _elevenlabs(text: str) -> bytes:
     return pcm[: len(pcm) // 2 * 2]
 
 
-def synthesize(text: str, voice: str = "Nora", rate: int = 190) -> bytes:
-    """Returnerer rå PCM (s16le, mono, 16 kHz)."""
+def synthesize(text: str, voice: str = "Samantha", rate: int = 190) -> bytes:
+    """Returns raw PCM (s16le, mono, 16 kHz)."""
     text = clean_for_speech(text)
     if not text:
         return b""
@@ -78,10 +78,10 @@ def synthesize(text: str, voice: str = "Nora", rate: int = 190) -> bytes:
             if len(_el_cache) < 50 and len(text) < 80:
                 _el_cache[text] = pcm
             return pcm
-        except Exception as e:  # noqa: BLE001 – faller tilbake til say
+        except Exception as e:  # noqa: BLE001 – falls back to say
             try:
                 from backend.log import log
-                log("warn", f"ElevenLabs feilet, bruker say: {e}")
+                log("warn", f"ElevenLabs failed, using say: {e}")
             except Exception:  # noqa: BLE001
                 pass
     if voice not in _voice_cache:
@@ -95,7 +95,7 @@ def synthesize(text: str, voice: str = "Nora", rate: int = 190) -> bytes:
         cmd += ["-r", str(rate), "-o", path, "--data-format=LEI16@16000", text]
         subprocess.run(cmd, check=True, capture_output=True, timeout=30)
         with wave.open(path, "rb") as w:
-            assert w.getsampwidth() == 2 and w.getnchannels() == 1, "uventet WAV-format fra say"
+            assert w.getsampwidth() == 2 and w.getnchannels() == 1, "unexpected WAV format from say"
             return w.readframes(w.getnframes())
     finally:
         try:
@@ -105,19 +105,19 @@ def synthesize(text: str, voice: str = "Nora", rate: int = 190) -> bytes:
 
 
 def prepare_for_speaker(pcm: bytes, cutoff_hz: float = 220.0, peak: float = 0.92) -> bytes:
-    """For den lille høyttaleren: fjern bass (forvrenger) og normaliser til nesten full styrke."""
+    """For the small speaker: remove bass (it distorts) and normalize to almost full volume."""
     import numpy as np
 
     x = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
     if not len(x):
         return pcm
-    # 2. ordens høypass (to kaskaderte 1. ordens)
+    # 2nd-order high-pass (two cascaded 1st-order)
     rc = 1.0 / (2 * np.pi * cutoff_hz)
     a = rc / (rc + 1.0 / SAMPLE_RATE)
     for _ in range(2):
         y = np.empty_like(x)
         prev_x = prev_y = 0.0
-        for i in range(len(x)):  # ~100k samples: ok (< 0,1 s)
+        for i in range(len(x)):  # ~100k samples: ok (< 0.1 s)
             prev_y = a * (prev_y + x[i] - prev_x)
             prev_x = x[i]
             y[i] = prev_y
@@ -125,7 +125,7 @@ def prepare_for_speaker(pcm: bytes, cutoff_hz: float = 220.0, peak: float = 0.92
     m = float(np.max(np.abs(x)))
     if m > 1e-4:
         x = x * (peak / m)
-    # 10 ms inn-/uttoning mot klikk
+    # 10 ms fade in/out against clicks
     f = min(160, len(x) // 2)
     if f:
         ramp = np.linspace(0, 1, f, dtype=np.float32)
@@ -143,7 +143,7 @@ def write_wav(pcm: bytes, path: str, rate: int = SAMPLE_RATE) -> None:
 
 
 def play_laptop(pcm: bytes) -> None:
-    """Spiller PCM på laptopen (blokkerer til ferdig)."""
+    """Plays PCM on the laptop (blocks until done)."""
     if not pcm:
         return
     fd, path = tempfile.mkstemp(suffix=".wav")
@@ -159,9 +159,9 @@ def play_laptop(pcm: bytes) -> None:
 
 
 def chunk_b64(pcm: bytes, max_chars: int = 3000) -> list[str]:
-    """Deler PCM i base64-biter på ≤ max_chars tegn, alltid på hele samples."""
-    raw_per_chunk = (max_chars // 4) * 3          # base64: 3 byte → 4 tegn
-    raw_per_chunk -= raw_per_chunk % 6            # delelig med 2 (sample) og 3 (ingen padding midt i)
+    """Splits PCM into base64 chunks of ≤ max_chars characters, always on whole samples."""
+    raw_per_chunk = (max_chars // 4) * 3          # base64: 3 bytes → 4 characters
+    raw_per_chunk -= raw_per_chunk % 6            # divisible by 2 (sample) and 3 (no padding in the middle)
     return [base64.b64encode(pcm[i:i + raw_per_chunk]).decode("ascii")
             for i in range(0, len(pcm), raw_per_chunk)]
 
@@ -171,7 +171,7 @@ def duration_s(pcm: bytes) -> float:
 
 
 if __name__ == "__main__":
-    # Rask stemmetest:  ../.venv/bin/python -m backend.tts "Hei, jeg er nattbordet ditt."  [--board]
+    # Quick voice test:  ../.venv/bin/python -m backend.tts "Hi, I am your nightstand."  [--board]
     import sys
     import time
 
@@ -179,11 +179,11 @@ if __name__ == "__main__":
 
     cfg = load_config()
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    text = " ".join(args) or "Hei! I morgen har du forelesning klokka kvart over åtte, og lunsj med Ingrid klokka tolv."
+    text = " ".join(args) or "Hi! Tomorrow you have a lecture at quarter past eight, and lunch with Ingrid at twelve."
     t0 = time.monotonic()
     pcm = synthesize(text, cfg.tts_voice, cfg.tts_rate)
     engine = "elevenlabs" if os.getenv("ELEVENLABS_API_KEY") and os.getenv("TTS_ENGINE", "elevenlabs") != "say" else "say"
-    print(f"{engine}: {time.monotonic() - t0:.2f} s for {len(pcm) / 32000:.1f} s lyd")
+    print(f"{engine}: {time.monotonic() - t0:.2f} s for {len(pcm) / 32000:.1f} s audio")
     if "--board" in sys.argv:
         from backend.device import BoardDevice
         d = BoardDevice()

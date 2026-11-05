@@ -25,7 +25,7 @@ Atech-SDK-et snakker med brettet **bare over USB-seriell**. Wi-Fi-gatewayen bruk
 ```sh
 uv venv --python 3.12 .venv            # i repo-roten
 VIRTUAL_ENV=.venv uv pip install -r nattbord/requirements.txt
-cp nattbord/.env.example nattbord/.env # legg inn ANTHROPIC_API_KEY
+cp nattbord/.env.example nattbord/.env # legg inn ANTHROPIC_API_KEY og ELEVENLABS_API_KEY
 ```
 
 ### Google Kalender (valgfritt, ca. 5 minutter)
@@ -45,6 +45,7 @@ Assistenten kan lese, legge inn, flytte og slette. Gjentakende avtaler endres ba
 ```sh
 ../.venv/bin/atech upload firmware             # flash brettet (USB-C datakabel)
 ../.venv/bin/atech check                       # hvilke moduler svarte
+./run.sh                                       # full stemmeløkke mot brettet (samme som linja under)
 ../.venv/bin/python -m backend.main            # full stemmeløkke mot brettet
 ../.venv/bin/python -m backend.main --no-board # bare laptop (mik + høyttaler)
 ../.venv/bin/python -m backend.textmode        # skriv i stedet for å snakke
@@ -59,6 +60,7 @@ Reserve: sett `AUDIO_IN=laptop` og/eller `AUDIO_OUT=laptop` i `.env`.
 - **Gå bort til brettet.** Avstandssensoren merker deg (under ca. 500 mm), og da lytter den når du snakker.
 - **Kort trykk** starter lytting med en gang, eller stopper alarmen.
 - **Hold knappen** for å snakke. **Stille hold over 3 s** starter kveldsrutinen (demo).
+- **Tale sendes til ElevenLabs.** Alt mikrofonen tar opp, også bakgrunnsprat nær brettet, forlater laptopen for å bli gjort om til tekst.
 - **Endre kalenderen krever knapp.** Det assistenten fanger opp av seg selv kan lese, men ikke legge inn, flytte eller slette.
 - **Alarm og soloppgang** går lokalt på brettet, også uten backend. Klokka settes fra laptopen ved oppstart.
 

@@ -2,11 +2,14 @@
 
 Rører verken brettet, Claude eller Google. Exit 0 betyr at alt holdt.
 """
+import base64
 import json
 import tempfile
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
+
+import numpy as np
 
 from . import plugin as plugin_module
 from .agent import FALLBACK_TOOL_ERROR, NEEDS_BUTTON, Assistant
@@ -15,6 +18,7 @@ from .config import Config
 from .device import LogDevice
 from .plugin import ExternalError, Plugin, request_json, route_event
 from .room import Room
+from .stt import STT
 
 plugin_module.RETRY_WAIT_S = 0  # selvtesten skal ikke sove
 
@@ -162,6 +166,55 @@ def test_demo_and_calendar_plugin() -> None:
         def get_events(self, day):
             return [all_day]
     assert "hele dagen Ferie" in CalendarPlugin(OneDay(), "Europe/Oslo").context()
+
+
+class FakeSocket:
+    """Svarer som ElevenLabs etter at siste bit er committet."""
+
+    def __init__(self, *replies):
+        self.replies, self.sent, self.closed = list(replies), [], False
+
+    def send(self, raw):
+        self.sent.append(json.loads(raw))
+
+    def recv(self, timeout=None):
+        assert self.sent and self.sent[-1]["commit"], "ikke vent på svar før lyden er committet"
+        return json.dumps(self.replies.pop(0))
+
+    def close(self):
+        self.closed = True
+
+
+def test_stt() -> None:
+    speech = (np.sin(np.arange(32000) / 8) * 8000).astype(np.int16)  # 2 s
+    done = {"message_type": "committed_transcript", "text": " Hva har jeg i morgen? "}
+
+    ws = FakeSocket({"message_type": "warning"}, {"message_type": "partial_transcript", "text": "Hva"}, done)
+    assert STT(lambda: ws).transcribe(speech) == "Hva har jeg i morgen?"
+    assert [c["commit"] for c in ws.sent] == [False] * (len(ws.sent) - 1) + [True], "bare siste bit committer"
+    sent = b"".join(base64.b64decode(c["audio_base_64"]) for c in ws.sent)
+    assert len(sent) == 64000 and ws.sent[0]["sample_rate"] == 16000, "16 kHz int16, ingenting mistet"
+    assert ws.closed
+
+    ws = FakeSocket({"message_type": "committed_transcript", "text": "Hm."})
+    assert STT(lambda: ws).transcribe(speech) is None, "ett ord regnes ikke som tale"
+    assert STT(lambda: FakeSocket({"message_type": "insufficient_audio_activity"})).transcribe(speech) is None
+    assert STT(lambda: FakeSocket()).transcribe(np.zeros(0, dtype=np.int16)) is None, "tomt opptak sendes ikke"
+
+    ws = FakeSocket({"message_type": "quota_exceeded", "error": "tomt"})
+    try:
+        STT(lambda: ws).transcribe(speech)
+        raise AssertionError("feil fra tjenesten skal kastes")
+    except ExternalError as e:
+        assert "quota_exceeded" in str(e) and ws.closed, "socketen lukkes også ved feil"
+
+    def down():
+        raise OSError("nett nede")
+    try:
+        STT(down).transcribe(speech)
+        raise AssertionError("nettfeil skal bli ExternalError")
+    except ExternalError:
+        pass
 
 
 # Samme skjelett som docs/INTERFACE.md, avsnitt 4 og 5.

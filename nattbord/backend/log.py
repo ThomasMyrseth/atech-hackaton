@@ -1,4 +1,4 @@
-"""Felles logging til terminalen (vises på storskjerm under demo)."""
+"""Shared logging to the terminal (shown on the big screen during the demo)."""
 from datetime import datetime
 
 from rich.console import Console

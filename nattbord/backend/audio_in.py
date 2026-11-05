@@ -1,4 +1,4 @@
-"""Lyd inn: sett sammen audio_chunk-events fra brettet, eller ta opp fra laptop-mikrofonen."""
+"""Audio in: assemble audio_chunk events from the board, or record from the laptop mic."""
 from __future__ import annotations
 
 import base64
@@ -17,7 +17,7 @@ RATE = 16000
 
 
 class ChunkAssembler:
-    """Samler audio_chunk {seq, data} til én int16-array."""
+    """Collects audio_chunk {seq, data} into one int16 array."""
 
     def __init__(self) -> None:
         self.reset()
@@ -39,14 +39,14 @@ class ChunkAssembler:
         try:
             self.chunks[int(value["seq"])] = base64.b64decode(value["data"])
         except Exception as e:  # noqa: BLE001
-            log("warn", f"ødelagt audio_chunk: {e}")
+            log("warn", f"corrupt audio_chunk: {e}")
         self.t_last = time.monotonic()
 
     def finish(self, info: Optional[dict] = None) -> np.ndarray:
         expected = int((info or {}).get("chunks", len(self.chunks)))
         missing = [i for i in range(expected) if i not in self.chunks]
         if missing:
-            log("warn", f"mangler {len(missing)}/{expected} lydbiter: {missing[:10]}")
+            log("warn", f"missing {len(missing)}/{expected} audio chunks: {missing[:10]}")
         data = b"".join(self.chunks[i] for i in sorted(self.chunks))
         pcm = np.frombuffer(data[: len(data) // 2 * 2], dtype=np.int16).copy()
         self.reset()
@@ -54,7 +54,7 @@ class ChunkAssembler:
 
 
 def normalize(pcm: np.ndarray, target_peak: float = 0.9) -> np.ndarray:
-    """int16 -> float32 [-1, 1], med forsterkning så stille mikrofoner blir hørbare for whisper."""
+    """int16 -> float32 [-1, 1], with gain so quiet mics are audible to speech to text."""
     x = pcm.astype(np.float32) / 32768.0
     x = x - float(np.mean(x)) if len(x) else x
     peak = float(np.max(np.abs(x))) if len(x) else 0.0
@@ -79,10 +79,10 @@ def save_wav(path: Path, pcm: np.ndarray) -> None:
 
 
 class LaptopListener:
-    """Reserve: laptop-mikrofonen med enkel energi-VAD i egen tråd.
+    """Fallback: the laptop mic with simple energy VAD in its own thread.
 
-    `enabled()` avgjør om vi skal lytte (presence og ikke snakker). Ferdige ytringer
-    havner i `self.utterances` som int16-arrays.
+    `enabled()` decides whether we listen (presence and not speaking). Finished utterances
+    land in `self.utterances` as (int16 array, forced by the button).
     """
 
     def __init__(self, threshold: float = 600.0, enabled: Callable[[], bool] = lambda: True,
@@ -91,7 +91,7 @@ class LaptopListener:
         self.enabled = enabled
         self.silence_s, self.max_s, self.min_s = silence_s, max_s, min_s
         self.utterances: "queue.Queue[tuple[np.ndarray, bool]]" = queue.Queue()
-        self.force = threading.Event()   # knapp: start opptak nå
+        self.force = threading.Event()   # button: start recording now
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True, name="laptop-mic")
 
@@ -110,7 +110,7 @@ class LaptopListener:
         recording = False
         t_start = t_loud = 0.0
         with sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=block) as stream:
-            log("audio", "laptop-mikrofon åpen")
+            log("audio", "laptop mic open")
             while not self._stop.is_set():
                 data, _ = stream.read(block)
                 x = data[:, 0].copy()
@@ -125,10 +125,10 @@ class LaptopListener:
                         recording = True
                         rec = list(preroll)
                         t_start = t_loud = now
-                        log("audio", f"laptop: opptak starter (nivå {level:.0f})")
+                        log("audio", f"laptop: recording starts (level {level:.0f})")
                     continue
                 rec.append(x)
-                if self.force.is_set():  # knapp under auto-opptak: direkte forespørsel, som på brettet
+                if self.force.is_set():  # button during auto recording: direct request, as on the board
                     self.force.clear()
                     forced = True
                 if level > self.threshold * 0.6:
@@ -138,6 +138,6 @@ class LaptopListener:
                     pcm = np.concatenate(rec)
                     dur = len(pcm) / RATE
                     if dur >= self.min_s:
-                        log("audio", f"laptop: ytring {dur:.1f} s")
+                        log("audio", f"laptop: utterance {dur:.1f} s")
                         self.utterances.put((pcm, forced))
                     preroll = []

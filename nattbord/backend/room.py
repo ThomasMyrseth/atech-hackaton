@@ -1,4 +1,4 @@
-"""Siste temp/fukt fra AHT20 + vurdering for søvn."""
+"""Latest temperature and humidity from the AHT20, plus an assessment for sleep."""
 from datetime import datetime
 from typing import Optional
 
@@ -16,7 +16,7 @@ class Room:
         return r
 
     def update(self, key: str, value) -> bool:
-        """Tar imot board-events. Returnerer True hvis nøkkelen var en romverdi."""
+        """Takes board events. Returns True if the key was a room value."""
         try:
             v = float(value)
         except (TypeError, ValueError):
@@ -39,21 +39,21 @@ class Room:
 
     def assess(self) -> str:
         if self.temp is None or self.humidity is None:
-            return "Ingen romdata ennå."
+            return "No room data yet."
         t, rh = self.temp, self.humidity
         parts = []
         if t < 16:
-            parts.append(f"{t:.1f} grader er kaldt for søvn, skru opp varmen litt")
+            parts.append(f"{t:.1f} degrees is cold for sleep, turn the heat up a little")
         elif t <= 19:
-            parts.append(f"{t:.1f} grader er perfekt for søvn")
+            parts.append(f"{t:.1f} degrees is perfect for sleep")
         elif t <= 21:
-            parts.append(f"{t:.1f} grader er litt varmt for søvn, åpne vinduet en stund")
+            parts.append(f"{t:.1f} degrees is a bit warm for sleep, open the window for a while")
         else:
-            parts.append(f"{t:.1f} grader er for varmt for god søvn, luft ut og skru ned ovnen")
+            parts.append(f"{t:.1f} degrees is too warm for good sleep, air the room and turn the heater down")
         if rh < 40:
-            parts.append(f"luftfuktigheten på {rh:.0f} prosent er tørr, et glass vann på nattbordet hjelper")
+            parts.append(f"humidity at {rh:.0f} percent is dry, a glass of water on the nightstand helps")
         elif rh <= 60:
-            parts.append(f"luftfuktigheten på {rh:.0f} prosent er bra")
+            parts.append(f"humidity at {rh:.0f} percent is good")
         else:
-            parts.append(f"luftfuktigheten på {rh:.0f} prosent er høy, luft ut ti minutter")
-        return "; ".join(parts) + ". (Bra for søvn: 16–19 °C og 40–60 % RH.)"
+            parts.append(f"humidity at {rh:.0f} percent is high, air the room for ten minutes")
+        return "; ".join(parts) + ". (Good for sleep: 16–19 °C and 40–60 % RH.)"

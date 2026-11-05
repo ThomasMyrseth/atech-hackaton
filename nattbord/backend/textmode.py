@@ -1,6 +1,6 @@
-"""Tekstmodus: skriv i stedet for å snakke. Kjør: cd nattbord && ../.venv/bin/python -m backend.textmode
+"""Text mode: type instead of talking. Run: cd nattbord && ../.venv/bin/python -m backend.textmode
 
-Kommandoer: /kveld (kveldsrutine), /reset (ny samtale), /stille (tale av/på), /quit
+Commands: /evening (evening routine), /reset (new conversation), /mute (speech on/off), /quit
 """
 import time
 
@@ -13,7 +13,7 @@ from .tts import duration_s, play_laptop, synthesize
 
 try:
     from .device import LogDevice
-except ImportError:  # device.py eies av hovedtråden; enkel reserve til den finnes
+except ImportError:  # device.py is owned by the main thread; simple fallback until it exists
     class LogDevice:  # type: ignore[no-redef]
         def action(self, key: str, value="") -> bool:
             log("action", f"→ {key} {value!r}")
@@ -25,7 +25,7 @@ def speak(text: str, cfg, muted: bool) -> None:
         return
     t0 = time.monotonic()
     pcm = synthesize(text, cfg.tts_voice, cfg.tts_rate)
-    log("tts", f"say {time.monotonic() - t0:.2f}s → {duration_s(pcm):.1f}s lyd")
+    log("tts", f"say {time.monotonic() - t0:.2f}s → {duration_s(pcm):.1f}s audio")
     play_laptop(pcm)
 
 
@@ -34,12 +34,12 @@ def main() -> None:
     device = LogDevice()
     assistant = Assistant(device, Room.fake(), get_plugins(cfg, device), cfg)
     muted = False
-    console.print(f"[bold]Nattbord – tekstmodus[/bold]  modell={cfg.model} thinking={cfg.thinking} "
-                  f"effort={cfg.effort} stemme={cfg.tts_voice}")
-    console.print("[dim]Skriv på norsk. /kveld /reset /stille /quit[/dim]")
+    console.print(f"[bold]Nattbord – text mode[/bold]  model={cfg.model} thinking={cfg.thinking} "
+                  f"effort={cfg.effort} voice={cfg.tts_voice}")
+    console.print("[dim]Type in English. /evening /reset /mute /quit[/dim]")
     while True:
         try:
-            line = console.input("[bold cyan]du> [/bold cyan]").strip()
+            line = console.input("[bold cyan]you> [/bold cyan]").strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
             break
@@ -50,16 +50,16 @@ def main() -> None:
         if line == "/reset":
             assistant.reset()
             continue
-        if line == "/stille":
+        if line == "/mute":
             muted = not muted
-            log("tts", "tale AV" if muted else "tale PÅ")
+            log("tts", "speech OFF" if muted else "speech ON")
             continue
         t0 = time.monotonic()
-        text = assistant.evening_routine() if line == "/kveld" else assistant.respond(line)
+        text = assistant.evening_routine() if line == "/evening" else assistant.respond(line)
         t_agent = time.monotonic() - t0
         console.print(f"[bold green]nattbord>[/bold green] {text}")
         speak(text, cfg, muted)
-        log("time", f"agent {t_agent:.2f}s, totalt med tale {time.monotonic() - t0:.2f}s")
+        log("time", f"agent {t_agent:.2f}s, total with speech {time.monotonic() - t0:.2f}s")
 
 
 if __name__ == "__main__":

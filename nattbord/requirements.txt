@@ -1,7 +1,7 @@
 anthropic
 atech
 python-dotenv
-faster-whisper
+websockets
 numpy
 sounddevice
 rich

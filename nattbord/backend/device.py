@@ -1,4 +1,4 @@
-"""Brettet over USB (Atech SDK), pluss en logg-enhet for tekstmodus. Device er eneste vei til brettet."""
+"""The board over USB (Atech SDK), plus a log device for text mode. Device is the only path to the board."""
 from __future__ import annotations
 
 import base64
@@ -8,29 +8,29 @@ from typing import Optional, Protocol
 
 from backend.log import log
 
-# Actions som ikke skal spamme loggen
+# Actions that should not spam the log
 _QUIET = {"speaker_play_pcm", "hello"}
 
 
 class Device(Protocol):
-    """Grensen rundt brettet. Grensene for hva som kan sendes står i docs/INTERFACE.md.
+    """The boundary around the board. The limits on what can be sent are in docs/INTERFACE.md.
 
-    play_pcm holder låsen under hele avspillingen, så action venter til talen er ferdig.
+    play_pcm holds the lock for the whole playback, so action waits until the speech is done.
     """
 
     is_board: bool
 
     def action(self, key: str, value="") -> bool:
-        """Sender én action og venter på ack. False hvis brettet avviste eller ikke svarte."""
+        """Sends one action and waits for the ack. False if the board rejected it or did not answer."""
 
     def play_pcm(self, pcm: bytes) -> float:
-        """Spiller 16 kHz mono s16le og returnerer sekunder brukt."""
+        """Plays 16 kHz mono s16le and returns the seconds used."""
 
     def recv(self, timeout: float = 0.2):
-        """Neste event fra brettet, eller None. Bare hovedløkka skal kalle denne."""
+        """Next event from the board, or None. Only the main loop may call this."""
 
     def close(self) -> None:
-        """Frigjør porten."""
+        """Releases the port."""
 
 
 def _short(v) -> str:
@@ -39,7 +39,7 @@ def _short(v) -> str:
 
 
 class LogDevice:
-    """Ingen hardware: logger bare hva som ville blitt sendt."""
+    """No hardware: only logs what would have been sent."""
 
     is_board = False
 
@@ -60,16 +60,16 @@ class LogDevice:
 
 
 class BoardDevice:
-    """Atech-brettet på USB-seriell (JSON-linjer, én ack per action)."""
+    """The Atech board on USB serial (JSON lines, one ack per action)."""
 
     is_board = True
 
     def __init__(self, port: Optional[str] = None):
-        from atech import Board  # importeres her så tekstmodus ikke trenger pyserial
+        from atech import Board  # imported here so text mode does not need pyserial
 
         self.board = Board.connect(port=port)
         self._lock = threading.Lock()
-        log("board", f"koblet til brettet ({port or 'auto'})")
+        log("board", f"connected to the board ({port or 'auto'})")
 
     def action(self, key: str, value="", timeout: float = 2.0) -> bool:
         from atech import ActionRejected, NoAcknowledgement
@@ -81,16 +81,16 @@ class BoardDevice:
                     log("action", f"{key} {_short(value)}")
                 return True
             except ActionRejected as e:
-                log("warn", f"{key} avvist: {e}")
+                log("warn", f"{key} rejected: {e}")
             except NoAcknowledgement:
-                log("warn", f"{key}: ingen ack fra brettet")
-            except Exception as e:  # noqa: BLE001 – demo skal aldri krasje
+                log("warn", f"{key}: no ack from the board")
+            except Exception as e:  # noqa: BLE001 – the demo must never crash
                 log("warn", f"{key}: {e}")
             return False
 
     def play_pcm(self, pcm: bytes, chunk_bytes: int = 2048) -> float:
-        """Send PCM som speaker_play_pcm-biter. Hver bit blokkerer på brettet til den er
-        skrevet til I2S-DMA, så vi sender neste så snart acken kommer."""
+        """Sends PCM as speaker_play_pcm chunks. Each chunk blocks on the board until it is
+        written to I2S DMA, so we send the next as soon as the ack arrives."""
         from atech import NoAcknowledgement
 
         t0 = time.monotonic()
@@ -103,7 +103,7 @@ class BoardDevice:
                 try:
                     self.board.call("speaker_play_pcm", b64, timeout=2.0)
                 except NoAcknowledgement:
-                    log("warn", "play_pcm: ingen ack, avbryter avspilling")
+                    log("warn", "play_pcm: no ack, aborting playback")
                     break
                 except Exception as e:  # noqa: BLE001
                     log("warn", f"play_pcm: {e}")
