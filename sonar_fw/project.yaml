@@ -1,0 +1,77 @@
+name: sonar_fw
+board: 14port
+modules:
+  - {id: speaker, instance: spk, ports: [1, 2]}
+  - {id: microphone, instance: mic, ports: [13, 14]}
+  - {id: distance_sensor, instance: tof, port: 9}
+code:
+  globals: |
+    #include <math.h>
+    #include <mbedtls/base64.h>
+
+    // Chirp constants must match sonar.py.
+    static const int SONAR_RATE = 16000;
+    static const float SONAR_F0 = 1000.0f;
+    static const float SONAR_F1 = 7000.0f;
+    static const int SONAR_CHIRP_LEN = 160;   // 10 ms
+    static const int SONAR_REC_LEN = 2000;    // 125 ms
+    static const int SONAR_CHUNK = 200;       // samples per event line
+    // Exactly one speaker DMA buffer, zero-padded after the chirp. A shorter write
+    // leaves the I2S driver mid-buffer, so the next chirp tears or plays up to 128 ms late.
+    static const int SONAR_DMA_LEN = 256;
+    static int16_t sonar_chirp[SONAR_DMA_LEN];
+  setup: |
+    // The generated firmware sets 0, which drops bytes when the TX buffer fills.
+    Serial.setTxTimeoutMs(100);
+
+    const float dur = (float)SONAR_CHIRP_LEN / SONAR_RATE;
+    for (int i = 0; i < SONAR_CHIRP_LEN; i++) {
+      float t = (float)i / SONAR_RATE;
+      float phase = 2 * PI * (SONAR_F0 * t + (SONAR_F1 - SONAR_F0) * t * t / (2 * dur));
+      float hann = 0.5f - 0.5f * cos(2 * PI * i / (SONAR_CHIRP_LEN - 1));
+      sonar_chirp[i] = (int16_t)(30000 * hann * sin(phase));
+    }
+  loop: |
+    enum { IDLE, ARMED, RECORDING, SENDING };
+    static int state = IDLE;
+    static unsigned long armedAt = 0;
+    static int sent = 0;
+
+    if (atech_action == "ping") {
+      if (state != IDLE) {
+        atechFail("busy");
+      } else {
+        mic.startRecording();
+        if (mic.isRecording()) {
+          armedAt = millis();
+          state = ARMED;
+        } else {
+          atechFail("no memory for recording");
+        }
+      }
+      atechDone();
+    }
+
+    if (state == ARMED && millis() - armedAt >= 5) {
+      spk.writeSamples(sonar_chirp, SONAR_DMA_LEN);
+      state = RECORDING;
+    }
+
+    if (state == RECORDING && mic.getRecordingLength() >= SONAR_REC_LEN) {
+      mic.stopRecording();
+      // Ground truth for calibration: the four centre zones in mm, 0 = no target.
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"sensor\",\"key\":\"tof_center\",\"value\":[%d,%d,%d,%d]}}\n",
+                    tof.getDistance(27), tof.getDistance(28), tof.getDistance(35), tof.getDistance(36));
+      sent = 0;
+      state = SENDING;
+    }
+
+    if (state == SENDING) {
+      static char b64[SONAR_CHUNK * 3];
+      size_t n = 0;
+      mbedtls_base64_encode((unsigned char*)b64, sizeof(b64), &n,
+                            (const unsigned char*)(mic.getRecording() + sent * SONAR_CHUNK),
+                            SONAR_CHUNK * sizeof(int16_t));
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"sensor\",\"key\":\"sonar\",\"value\":\"%d:%s\"}}\n", sent, b64);
+      if (++sent * SONAR_CHUNK >= SONAR_REC_LEN) state = IDLE;
+    }
