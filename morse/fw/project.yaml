@@ -1,0 +1,106 @@
+name: morse_fw
+board: 14port
+modules:
+  - {id: speaker, instance: spk, ports: [1, 2]}
+  - {id: microphone, instance: mic, ports: [13, 14]}
+  - {id: button, instance: key, port: 3}
+  - {id: neopixel, instance: led, port: 4}
+code:
+  globals: |
+    #include <freertos/stream_buffer.h>
+    #include <mbedtls/base64.h>
+
+    static const int MIC_GAIN = 16;       // the mic is too quiet for speech-to-text as is
+    static const int FRAME_BYTES = 1024;  // 32 ms of 16 kHz mono, one event line
+    static StreamBufferHandle_t micBuffer;
+    static volatile bool micOn = false;
+
+    // Morse playback, driven from loop with millis().
+    static String morsePattern;
+    static int morseUnit = 0;
+    static int morsePos = -1;  // -1 = idle
+    static unsigned long morseUntil = 0;
+    static bool morseLit = false;
+
+    // Runs on the capture task (core 0): no Serial, no module calls.
+    static void onMic(const int16_t* samples, int count, void*) {
+      if (!micOn) return;
+      static int16_t boosted[Microphone::BUFFER_SAMPLES];
+      for (int i = 0; i < count; i++) {
+        boosted[i] = constrain(samples[i] * MIC_GAIN, -32768, 32767);
+      }
+      xStreamBufferSend(micBuffer, boosted, count * sizeof(int16_t), 0);
+    }
+  setup: |
+    // The generated firmware sets 0, which drops bytes when the TX buffer fills.
+    Serial.setTxTimeoutMs(100);
+    micBuffer = xStreamBufferCreate(16000, 1);  // 0.5 s
+    mic.onAudio(onMic, nullptr);
+  loop: |
+    // Stamped here because USB and Python jitter would corrupt dit and dah lengths.
+    if (key.wasPressed()) {
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"button\",\"key\":\"edge\",\"value\":\"1:%lu\"}}\n", millis());
+    }
+    if (key.wasReleased()) {
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"button\",\"key\":\"edge\",\"value\":\"0:%lu\"}}\n", millis());
+    }
+
+    if (atech_action == "mic_on") {
+      micOn = atech_value == "1";
+      if (micOn) {
+        led.setPixel(4, 0, 0, 60);  // dim centre light: Thomas can talk now
+      } else {
+        xStreamBufferReset(micBuffer);
+        led.clear();
+      }
+      led.show();
+      atechDone();
+    }
+
+    if (xStreamBufferBytesAvailable(micBuffer) >= FRAME_BYTES) {
+      static uint8_t frame[FRAME_BYTES];
+      static char b64[FRAME_BYTES * 2];
+      size_t n = 0;
+      xStreamBufferReceive(micBuffer, frame, FRAME_BYTES, 0);
+      mbedtls_base64_encode((unsigned char*)b64, sizeof(b64), &n, frame, FRAME_BYTES);
+      Serial.printf("{\"type\":\"event\",\"payload\":{\"event_type\":\"sensor\",\"key\":\"audio\",\"value\":\"%s\"}}\n", b64);
+    }
+
+    if (atech_action == "morse") {
+      // Value is "<unit_ms>:<pattern>". atechDone() clears atech_value, so read it first.
+      int colon = atech_value.indexOf(':');
+      if (morsePos >= 0) {
+        atechFail("busy");
+      } else if (colon < 1 || atech_value.toInt() <= 0) {
+        atechFail("expected unit_ms:pattern");
+      } else {
+        morseUnit = atech_value.toInt();
+        morsePattern = atech_value.substring(colon + 1);
+        morsePos = 0;
+        morseLit = false;
+        morseUntil = millis();
+      }
+      atechDone();
+    }
+
+    if (morsePos >= 0 && (long)(millis() - morseUntil) >= 0) {
+      if (morseLit) {
+        led.clear();
+        led.show();
+        morseLit = false;
+        int gap = 1;  // units dark: 1 inside a letter, 3 between letters, 7 between words
+        while (morsePos < (int)morsePattern.length() && morsePattern[morsePos] != '.' && morsePattern[morsePos] != '-') {
+          gap = max(gap, morsePattern[morsePos] == '/' ? 7 : 3);
+          morsePos++;
+        }
+        morseUntil += gap * morseUnit;
+      } else if (morsePos >= (int)morsePattern.length()) {
+        morsePos = -1;
+        Serial.println("{\"type\":\"event\",\"payload\":{\"event_type\":\"state\",\"key\":\"morse_done\",\"value\":1}}");
+      } else {
+        led.setAll(255, 255, 255);
+        led.show();
+        morseLit = true;
+        morseUntil += (morsePattern[morsePos++] == '-' ? 3 : 1) * morseUnit;
+      }
+    }
