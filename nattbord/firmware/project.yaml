@@ -134,9 +134,10 @@ code:
         face = F_IDLE;
         return;
       }
-      char buf[128];
-      snprintf(buf, sizeof(buf), "{\"samples\":%u,\"chunks\":%d,\"rate\":16000,\"reason\":\"%s\"}",
-               (unsigned)recSamples, recSeq, reason);
+      char buf[160];
+      const char* kinds[] = {"vad", "ptt", "tap", "bench"};
+      snprintf(buf, sizeof(buf), "{\"samples\":%u,\"chunks\":%d,\"rate\":16000,\"reason\":\"%s\",\"kind\":\"%s\"}",
+               (unsigned)recSamples, recSeq, reason, kinds[recKind]);
       evRaw("state", "audio_end", buf);
       face = F_THINK;                                            // umiddelbar feedback
     }
@@ -426,7 +427,8 @@ code:
           else stopRecording("button", false);
         } else if (held <= 400) {
           evStr("button", "gesture", "press");
-          if (hostSeen && !recording && face != F_TALK) startRecording(2, 6000);
+          if (recording && recKind == 0) recKind = 2;     // trykk under auto-opptak = direkte forespørsel
+          else if (hostSeen && !recording && face != F_TALK) startRecording(2, 6000);
         }
       }
     }

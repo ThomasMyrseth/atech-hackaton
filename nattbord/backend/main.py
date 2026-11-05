@@ -140,7 +140,7 @@ class App:
             log("audio", f"[dim]opptak forkastet ({val})[/dim]")
             self.assembler.reset()
         elif key == "audio_end":
-            kind = self.assembler.kind or "vad"
+            kind = (val.get("kind") if isinstance(val, dict) else None) or self.assembler.kind or "vad"
             pcm = self.assembler.finish(val if isinstance(val, dict) else None)
             log("audio", f"audio_end ({kind}) {val}")
             if self.speaking or not self.jobs.empty():
@@ -155,6 +155,8 @@ class App:
                 self.laptop.force.set()
         elif key == "alarm":
             log("routine", f"⏰ alarm: {val}")
+            if val == "stopped":
+                self.jobs.put(("morning",))
         elif key == "diag":
             if self.args.diag:
                 log("board", f"[dim]diag {val}[/dim]")
@@ -182,6 +184,11 @@ class App:
                     self.handle_utterance(job[1], job[2], job[3])
                 elif job[0] == "evening":
                     self.evening(job[1])
+                elif job[0] == "morning":
+                    self.device.action("face", "thinking")
+                    text = self.assistant.morning_routine()
+                    console.print(f"[bold yellow]   ☀️  {text}[/bold yellow]")
+                    self.say(text)
                 elif job[0] == "greet":
                     hour = datetime.now(self.tz).hour
                     hils = "God morgen" if hour < 10 else "Hei" if hour < 18 else "God kveld"

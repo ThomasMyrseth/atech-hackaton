@@ -201,6 +201,23 @@ class Assistant:
             self._trim()
         return text
 
+    def morning_routine(self) -> str:
+        """Kjøres når alarmen er skrudd av: god morgen + dagens viktigste."""
+        prompt = (
+            f"{self._now_line()}\n{self._context_line()}\n"
+            "Vekkerklokka er akkurat skrudd av, brukeren har nettopp våknet. Si god morgen og det viktigste i dag "
+            "i maks to korte, oppmuntrende setninger. Slå av lyset med set_light off, og skriv beskjeden i samme svar."
+        )
+        if datetime.now(self.tz).hour >= 12:  # demo på kvelden: lat som det er morgen neste dag
+            prompt += (" (Dette er en demo av morgenen: lat som det er morgen i morgen, og omtal morgendagens "
+                       "avtaler som «i dag». Ikke nevn at det er en demo.)")
+        log("routine", "morgenrutine startet")
+        text, msgs = self._run(self._with_history(self._user_msg(prompt)))
+        if msgs is not None:
+            self.history = msgs
+            self._trim()
+        return text
+
     # ---------------------------------------------------------------- internals
     def _now_line(self) -> str:
         n = datetime.now(self.tz)
